@@ -1,0 +1,6 @@
+h1:WuZi69kpkZ5hlDMrWSHGWBzMJNU59GXuonRFWk5F0EM=
+00000000000000_baseline.sql h1:23o3H7Rel+uZoaZcFjqn5CPmQIoI5VpLxzfRmsmJUdY=
+20260731071531_add_config_center.sql h1:o7qF3Prs8UHnxoigIWUFRFvMNTt2+P5JnKeEF0pm1E0=
+20260731194651_add_config_descriptions.sql h1:pKyL3DuARUWVMP3eve58bkHM0OfzGLihvuoCwYe70GA=
+20260803190134_add_config_namespaces.sql h1:iRopau7ZugFVf6nWe6v/MEMwT79fKnJyQ09ecA25+YM=
+20260804072402_add_config_namespace_api_key.sql h1:hg1hVExGyxjdkm4uMmcYX+LaePM2woHeiCihRVganJk=

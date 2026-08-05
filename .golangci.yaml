@@ -1,0 +1,98 @@
+version: "2"
+run:
+  concurrency: 1
+  issues-exit-code: 1
+  tests: true
+linters:
+  default: none
+  enable:
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - depguard
+    - dupl
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - forbidigo
+    - goconst
+    - gocritic
+    - govet
+    - ineffassign
+    - makezero
+    - nakedret
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - wastedassign
+    - whitespace
+    - wrapcheck
+    - zerologlint
+  settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $all
+            - $gostd
+            - github.com/caitunai/dotconfig
+            - github.com/rs/zerolog
+            - github.com/spf13/viper
+            - github.com/gin-gonic/gin
+            - github.com/redis/go-redis
+            - github.com/go-redis/cache
+            - github.com/go-resty/resty
+            - github.com/spf13/cobra
+            - github.com/gin-contrib
+            - github.com/golang-jwt/jwt
+            - github.com/ThreeDotsLabs/watermill
+            - github.com/ThreeDotsLabs/watermill-redisstream
+            - github.com/ThreeDotsLabs/watermill/message
+            - gorm.io/driver
+            - gorm.io/gorm
+            - ariga.io/atlas/atlasexec
+            - github.com/joho/godotenv
+          deny:
+            - pkg: reflect
+              desc: not allowed
+            - pkg: github.com/pkg/errors
+              desc: Should be replaced by standard lib errors package
+    govet:
+      enable-all: true
+      settings:
+        shadow:
+          strict: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: (.+)\.go$
+        text: 'getCSSJsFiles is unused'
+      - path: (.+)\.go$
+        text: 'shadow: declaration of "err" shadows declaration at'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  uniq-by-line: true
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
