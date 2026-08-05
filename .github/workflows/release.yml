@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux amd64 binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: storage/ui/package-lock.json
+
+      - name: Build frontend assets
+        working-directory: storage/ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Go binary
+        env:
+          CGO_ENABLED: "1"
+          GOARCH: amd64
+          GOOS: linux
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          go mod download
+          mkdir -p release
+          go build -trimpath -ldflags="-s -w" -o release/dotconfig-linux-amd64 .
+          ./release/dotconfig-linux-amd64 --help >/dev/null
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binary
+          path: release/dotconfig-linux-amd64
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release binary
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binary
+          path: release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/dotconfig-linux-amd64
