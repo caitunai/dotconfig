@@ -1,4 +1,4 @@
-table "gb_config_namespaces" {
+table "dc_config_namespaces" {
   schema = schema.default
   charset = "utf8mb4"
   collate = "utf8mb4_unicode_ci"
@@ -37,13 +37,13 @@ table "gb_config_namespaces" {
   primary_key {
     columns = [column.id]
   }
-  index "idx_gb_config_namespaces_slug" {
+  index "idx_dc_config_namespaces_slug" {
     unique  = true
     columns = [column.slug]
   }
 }
 
-table "gb_config_environments" {
+table "dc_config_environments" {
   schema = schema.default
   charset = "utf8mb4"
   collate = "utf8mb4_unicode_ci"
@@ -99,18 +99,18 @@ table "gb_config_environments" {
     unique  = true
     columns = [column.namespace_id, column.slug]
   }
-  index "idx_gb_config_environments_parent_id" {
+  index "idx_dc_config_environments_parent_id" {
     columns = [column.parent_id]
   }
-  foreign_key "fk_gb_config_environments_namespace" {
+  foreign_key "fk_dc_config_environments_namespace" {
     columns     = [column.namespace_id]
-    ref_columns = [table.gb_config_namespaces.column.id]
+    ref_columns = [table.dc_config_namespaces.column.id]
     on_update   = NO_ACTION
     on_delete   = CASCADE
   }
 }
 
-table "gb_config_releases" {
+table "dc_config_releases" {
   schema = schema.default
   charset = "utf8mb4"
   collate = "utf8mb4_unicode_ci"
@@ -152,16 +152,16 @@ table "gb_config_releases" {
   primary_key {
     columns = [column.id]
   }
-  index "idx_gb_config_releases_batch_id" {
+  index "idx_dc_config_releases_batch_id" {
     columns = [column.batch_id]
   }
   index "idx_config_release_version" {
     unique  = true
     columns = [column.environment_id, column.version]
   }
-  foreign_key "fk_gb_config_releases_environment" {
+  foreign_key "fk_dc_config_releases_environment" {
     columns     = [column.environment_id]
-    ref_columns = [table.gb_config_environments.column.id]
+    ref_columns = [table.dc_config_environments.column.id]
     on_update   = NO_ACTION
     on_delete   = CASCADE
   }

@@ -1,5 +1,7 @@
-table "users" {
+table "dc_users" {
   schema = schema.default
+  charset = "utf8mb4"
+  collate = "utf8mb4_unicode_ci"
   column "id" {
     null = false
     type = bigint
@@ -14,8 +16,10 @@ table "users" {
   }
 }
 
-table "roles" {
+table "dc_roles" {
   schema = schema.default
+  charset = "utf8mb4"
+  collate = "utf8mb4_unicode_ci"
   column "id" {
     null = false
     type = bigint
@@ -30,8 +34,10 @@ table "roles" {
   }
 }
 
-table "permissions" {
+table "dc_permissions" {
   schema = schema.default
+  charset = "utf8mb4"
+  collate = "utf8mb4_unicode_ci"
   column "id" {
     null = false
     type = bigint
