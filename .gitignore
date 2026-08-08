@@ -413,4 +413,5 @@ stats.html
 !/storage/ui/dist/keep.txt
 deploy.sh
 .env.production
+.env.production.linode
 dotconfig
