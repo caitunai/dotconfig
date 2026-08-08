@@ -18,6 +18,7 @@ import {
   removeDescriptionSubtree,
   remapDescriptionPrefix,
 } from "./config-format.js";
+import { calculateDropdownPosition } from "./dropdown-position.js";
 import "./main.css";
 
 const API_ROOT = "/config-center/api";
@@ -34,6 +35,7 @@ class ConfigTreeEditor {
     this.typeMemory = typeMemory;
     this.descriptionMemory = new Map();
     this.activeDescriptionControl = null;
+    this.activeDropdownControl = null;
     this.descriptionSequence = 0;
     this.handleDescriptionPointerDown = (event) => {
       if (this.activeDescriptionControl?.wrapper.contains(event.target)) return;
@@ -44,12 +46,16 @@ class ConfigTreeEditor {
       event.preventDefault();
       this.closeDescriptionPopover(true);
     };
+    this.handleDropdownViewportChange = () => this.positionActiveDropdown();
     document.addEventListener("pointerdown", this.handleDescriptionPointerDown);
     document.addEventListener("keydown", this.handleDescriptionKeyDown);
+    window.addEventListener("resize", this.handleDropdownViewportChange);
+    window.addEventListener("scroll", this.handleDropdownViewportChange, true);
   }
 
   render(value, descriptions = this.descriptions) {
     this.closeDescriptionPopover();
+    this.closeDropdown();
     this.value = value;
     this.descriptions = descriptions;
     this.root.replaceChildren();
@@ -286,8 +292,11 @@ class ConfigTreeEditor {
 
   destroy() {
     this.closeDescriptionPopover();
+    this.closeDropdown();
     document.removeEventListener("pointerdown", this.handleDescriptionPointerDown);
     document.removeEventListener("keydown", this.handleDescriptionKeyDown);
+    window.removeEventListener("resize", this.handleDropdownViewportChange);
+    window.removeEventListener("scroll", this.handleDropdownViewportChange, true);
   }
 
   renderValueInput(path, value, type) {
@@ -462,16 +471,9 @@ class ConfigTreeEditor {
     menuScroll.className = "select-menu-scroll";
     menu.append(menuScroll);
 
-    const close = () => {
-      menu.hidden = true;
-      trigger.setAttribute("aria-expanded", "false");
-      wrapper.classList.remove("config-dropdown-open");
-    };
-    const open = () => {
-      menu.hidden = false;
-      trigger.setAttribute("aria-expanded", "true");
-      wrapper.classList.add("config-dropdown-open");
-    };
+    const control = { wrapper, trigger, menu, menuScroll };
+    const close = () => this.closeDropdown(control);
+    const open = () => this.openDropdown(control);
 
     options.forEach((option) => {
       const item = this.button(option.label, "config-dropdown-option");
@@ -496,6 +498,43 @@ class ConfigTreeEditor {
     });
     wrapper.append(trigger, menu);
     return wrapper;
+  }
+
+  openDropdown(control) {
+    this.closeDropdown();
+    this.activeDropdownControl = control;
+    control.menu.hidden = false;
+    control.naturalMenuHeight = control.menu.scrollHeight;
+    control.trigger.setAttribute("aria-expanded", "true");
+    control.wrapper.classList.add("config-dropdown-open");
+    this.positionActiveDropdown();
+  }
+
+  closeDropdown(control = this.activeDropdownControl) {
+    if (!control) return;
+    control.menu.hidden = true;
+    control.trigger.setAttribute("aria-expanded", "false");
+    control.wrapper.classList.remove("config-dropdown-open", "config-dropdown-up");
+    control.menuScroll.style.removeProperty("max-height");
+    if (this.activeDropdownControl === control) this.activeDropdownControl = null;
+  }
+
+  positionActiveDropdown() {
+    const control = this.activeDropdownControl;
+    if (!control) return;
+    if (!control.trigger.isConnected) {
+      this.closeDropdown(control);
+      return;
+    }
+    const triggerRect = control.trigger.getBoundingClientRect();
+    const position = calculateDropdownPosition({
+      triggerTop: triggerRect.top,
+      triggerBottom: triggerRect.bottom,
+      viewportHeight: window.innerHeight,
+      menuHeight: control.naturalMenuHeight,
+    });
+    control.wrapper.classList.toggle("config-dropdown-up", position.opensAbove);
+    control.menuScroll.style.maxHeight = `${Math.max(48, position.maxHeight - 10)}px`;
   }
 }
 
@@ -595,6 +634,15 @@ function configCenterApp() {
 
     get selectedNamespace() { return this.namespaces.find((item) => item.id === this.selectedNamespaceID) ?? null; },
     get selectedEnvironment() { return this.environments.find((item) => item.id === this.selectedID) ?? null; },
+    get runtimeAPIEndpoint() {
+      const namespace = this.selectedNamespace?.slug ?? "{namespace}";
+      const environment = this.selectedEnvironment?.slug ?? "{environment}";
+      return `${API_ROOT}/runtime/${namespace}/${environment}?format=${this.displayFormat}`;
+    },
+    get runtimeAPIURL() { return `${window.location.origin}${this.runtimeAPIEndpoint}`; },
+    get runtimeCurlExample() {
+      return `curl --fail --show-error \\\n  -H "X-API-Key: <namespace-api-key>" \\\n  "${this.runtimeAPIURL}"`;
+    },
     get availableParents() { return this.environments.filter((item) => item.id !== this.environmentForm.id && !this.isDescendant(item.id, this.environmentForm.id)); },
     get availableParentRows() { return buildParentEnvironmentTree(this.availableParents); },
     get selectedParentLabel() {

@@ -445,6 +445,31 @@
     </section>
   </div>
 
+  <footer class="config-center-footer" aria-labelledby="runtime-api-docs-title">
+    <div class="config-center-footer-inner">
+      <div>
+        <div class="config-center-footer-eyebrow">Runtime API</div>
+        <h2 id="runtime-api-docs-title">获取已发布配置</h2>
+        <p>通过命名空间 API Key 获取指定环境的最新已发布完整配置。草稿不会通过此接口返回，调用方应始终使用 HTTPS 保护请求头中的凭据。</p>
+        <div class="config-center-footer-formats" aria-label="支持的输出格式">
+          <code>json</code><code>yaml</code><code>toml</code><code>env</code><code>ini</code>
+        </div>
+      </div>
+      <div class="config-center-footer-docs">
+        <div class="config-center-footer-row">
+          <span class="config-center-footer-label">请求地址 · GET</span>
+          <code class="config-center-footer-code" x-text="runtimeAPIEndpoint"></code>
+          <p>请求头：<code class="text-slate-300">X-API-Key: &lt;namespace-api-key&gt;</code>。JSON 返回标准响应结构；其他格式直接返回文本，并以注释保留配置说明。</p>
+        </div>
+        <div class="config-center-footer-row">
+          <span class="config-center-footer-label">cURL 示例</span>
+          <pre class="config-center-footer-code" x-text="runtimeCurlExample"></pre>
+          <button type="button" class="config-center-footer-copy" @click="copyText(runtimeCurlExample)">复制命令</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
   <div x-show="namespaceModal" x-transition.opacity class="modal-backdrop" @keydown.escape.window="closeNamespaceModal()">
     <section x-show="namespaceModal" x-transition class="modal-card" @click.outside="closeNamespaceModal()">
       <div class="flex items-start justify-between gap-4">
