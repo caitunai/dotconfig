@@ -43,24 +43,34 @@ const (
 	payloadReleaseConfig       = "release-config"
 	payloadReleaseDescriptions = "release-descriptions"
 	payloadNamespaceAPIKey     = "namespace-api-key"
+	payloadNamespaceWriteKey   = "namespace-write-api-key"
 	columnDraftConfig          = "draft_config"
 	columnDraftDescriptions    = "draft_descriptions"
+	columnAPIKey               = "api_key"
+	columnWriteAPIKey          = "write_api_key"
+	columnName                 = "name"
+	columnSlug                 = "slug"
+	columnDescription          = "description"
 )
 
 var (
-	ErrConfigNamespaceNotFound   = errors.New("config namespace not found")
-	ErrConfigNamespaceInvalid    = errors.New("invalid config namespace")
-	ErrConfigNamespaceConflict   = errors.New("config namespace conflicts with existing data")
-	ErrConfigAPIKeyInvalid       = errors.New("invalid config namespace API key")
-	ErrConfigAPIKeyUnauthorized  = errors.New("config namespace API key is unauthorized")
-	ErrConfigEncryptionRequired  = errors.New("config encryption is required")
-	ErrConfigEnvironmentNotFound = errors.New("config environment not found")
-	ErrConfigInvalid             = errors.New("invalid configuration")
-	ErrConfigEnvironmentInvalid  = errors.New("invalid config environment")
-	ErrConfigEnvironmentConflict = errors.New("config environment conflicts with existing data")
-	ErrConfigEnvironmentInUse    = errors.New("config environment is inherited by another environment")
-	ErrConfigReleaseNotFound     = errors.New("published configuration not found")
-	ErrConfigStorage             = errors.New("config storage operation failed")
+	ErrConfigNamespaceNotFound       = errors.New("config namespace not found")
+	ErrConfigNamespaceInvalid        = errors.New("invalid config namespace")
+	ErrConfigNamespaceConflict       = errors.New("config namespace conflicts with existing data")
+	ErrConfigAPIKeyInvalid           = errors.New("invalid config namespace API key")
+	ErrConfigAPIKeyUnauthorized      = errors.New("config namespace API key is unauthorized")
+	ErrConfigWriteAPIKeyInvalid      = errors.New("invalid config namespace write API key")
+	ErrConfigWriteAPIKeyUnauthorized = errors.New("config namespace write API key is unauthorized")
+	ErrConfigAPIKeysNotDistinct      = errors.New("config namespace read and write API keys must differ")
+	ErrConfigEncryptionRequired      = errors.New("config encryption is required")
+	ErrConfigEnvironmentNotFound     = errors.New("config environment not found")
+	ErrConfigInvalid                 = errors.New("invalid configuration")
+	ErrConfigEnvironmentInvalid      = errors.New("invalid config environment")
+	ErrConfigEnvironmentConflict     = errors.New("config environment conflicts with existing data")
+	ErrConfigEnvironmentInUse        = errors.New("config environment is inherited by another environment")
+	ErrConfigReleaseNotFound         = errors.New("published configuration not found")
+	ErrConfigPathNotFound            = errors.New("configuration path not found")
+	ErrConfigStorage                 = errors.New("config storage operation failed")
 
 	configSlugPattern   = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 	configAPIKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
@@ -69,15 +79,17 @@ var (
 // ConfigNamespace is the top-level boundary for a group of configuration
 // environments. Deleting it cascades to environments and their releases.
 type ConfigNamespace struct {
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Name             string    `gorm:"size:100;not null" json:"name"`
-	Slug             string    `gorm:"size:64;not null;uniqueIndex" json:"slug"`
-	Description      string    `gorm:"size:500;not null;default:''" json:"description"`
-	APIKey           string    `gorm:"column:api_key;type:mediumtext;not null" json:"-"`
-	ID               uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	EnvironmentCount int64     `gorm:"-" json:"environment_count"`
-	APIKeyConfigured bool      `gorm:"-" json:"api_key_configured"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	Name               string    `gorm:"size:100;not null" json:"name"`
+	Slug               string    `gorm:"size:64;not null;uniqueIndex" json:"slug"`
+	Description        string    `gorm:"size:500;not null;default:''" json:"description"`
+	APIKey             string    `gorm:"column:api_key;type:mediumtext;not null" json:"-"`
+	WriteAPIKey        string    `gorm:"column:write_api_key;type:mediumtext;not null" json:"-"`
+	ID                 uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	EnvironmentCount   int64     `gorm:"-" json:"environment_count"`
+	APIKeyConfigured   bool      `gorm:"-" json:"api_key_configured"`
+	WriteKeyConfigured bool      `gorm:"-" json:"write_api_key_configured"`
 }
 
 // ConfigEnvironment stores only the overrides owned by an environment. The
@@ -121,6 +133,7 @@ type ConfigNamespaceInput struct {
 	Slug        string
 	Description string
 	APIKey      string
+	WriteAPIKey string
 }
 
 type ResolvedConfig struct {
@@ -183,6 +196,7 @@ func ListConfigNamespaces(ctx context.Context) ([]ConfigNamespace, error) {
 	for index := range namespaces {
 		namespaces[index].EnvironmentCount = countByNamespace[namespaces[index].ID]
 		namespaces[index].APIKeyConfigured = namespaces[index].APIKey != ""
+		namespaces[index].WriteKeyConfigured = namespaces[index].WriteAPIKey != ""
 	}
 	return namespaces, nil
 }
@@ -219,9 +233,18 @@ func CreateConfigNamespace(ctx context.Context, input ConfigNamespaceInput) (*Co
 		if err != nil {
 			return err
 		}
+		storedWriteAPIKey, err := encryptNamespaceWriteAPIKey(input.WriteAPIKey, created.ID)
+		if err != nil {
+			return err
+		}
 		created.APIKey = storedAPIKey
+		created.WriteAPIKey = storedWriteAPIKey
 		created.APIKeyConfigured = true
-		if err := tx.Model(created).UpdateColumn("api_key", storedAPIKey).Error; err != nil {
+		created.WriteKeyConfigured = true
+		if err := tx.Model(created).UpdateColumns(map[string]any{
+			columnAPIKey:      storedAPIKey,
+			columnWriteAPIKey: storedWriteAPIKey,
+		}).Error; err != nil {
 			return errors.Join(ErrConfigStorage, err)
 		}
 		return nil
@@ -256,13 +279,27 @@ func UpdateConfigNamespace(ctx context.Context, id uint, input ConfigNamespaceIn
 		if existing > 0 {
 			return ErrConfigNamespaceConflict
 		}
-		changes := map[string]any{"name": input.Name, "slug": input.Slug, "description": input.Description}
+		if err := validateDistinctNamespaceCredentials(&namespace, input); err != nil {
+			return err
+		}
+		changes := map[string]any{
+			columnName:        input.Name,
+			columnSlug:        input.Slug,
+			columnDescription: input.Description,
+		}
 		if input.APIKey != "" {
 			storedAPIKey, err := encryptNamespaceAPIKey(input.APIKey, namespace.ID)
 			if err != nil {
 				return err
 			}
-			changes["api_key"] = storedAPIKey
+			changes[columnAPIKey] = storedAPIKey
+		}
+		if input.WriteAPIKey != "" {
+			storedWriteAPIKey, err := encryptNamespaceWriteAPIKey(input.WriteAPIKey, namespace.ID)
+			if err != nil {
+				return err
+			}
+			changes[columnWriteAPIKey] = storedWriteAPIKey
 		}
 		if err := tx.Model(&namespace).Updates(changes).Error; err != nil {
 			return errors.Join(ErrConfigStorage, err)
@@ -271,6 +308,7 @@ func UpdateConfigNamespace(ctx context.Context, id uint, input ConfigNamespaceIn
 			return errors.Join(ErrConfigStorage, err)
 		}
 		updated.APIKeyConfigured = updated.APIKey != ""
+		updated.WriteKeyConfigured = updated.WriteAPIKey != ""
 		return nil
 	})
 	if err != nil {
@@ -456,10 +494,10 @@ func UpdateConfigEnvironment(ctx context.Context, namespaceID, id uint, input Co
 			return ErrConfigEnvironmentConflict
 		}
 		changes := map[string]any{
-			"name":        input.Name,
-			"slug":        input.Slug,
-			"description": input.Description,
-			"parent_id":   input.ParentID,
+			columnName:        input.Name,
+			columnSlug:        input.Slug,
+			columnDescription: input.Description,
+			"parent_id":       input.ParentID,
 		}
 		if err := tx.Model(&ConfigEnvironment{}).Where("namespace_id = ? AND id = ?", namespaceID, id).Updates(changes).Error; err != nil {
 			return errors.Join(ErrConfigStorage, err)
@@ -570,23 +608,37 @@ func GetConfigDraft(ctx context.Context, namespaceID, environmentID uint) (*Reso
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	rawDraft, err := decryptConfigPayload(resolved.Environment.DraftConfig, draftPayloadContext(namespaceID, environmentID, payloadDraftConfig))
+	draft, descriptions, err := decodeEnvironmentDraft(resolved.Environment)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	return resolved, draft, descriptions, nil
+}
+
+func decodeEnvironmentDraft(environment ConfigEnvironment) (map[string]any, ConfigDescriptions, error) {
+	rawDraft, err := decryptConfigPayload(
+		environment.DraftConfig,
+		draftPayloadContext(environment.NamespaceID, environment.ID, payloadDraftConfig),
+	)
+	if err != nil {
+		return nil, nil, err
 	}
 	draft, err := DecodeConfig(rawDraft)
 	if err != nil {
-		return nil, nil, nil, errors.Join(ErrConfigStorage, err)
+		return nil, nil, errors.Join(ErrConfigStorage, err)
 	}
-	rawDescriptions, err := decryptConfigPayload(resolved.Environment.DraftDescriptions, draftPayloadContext(namespaceID, environmentID, payloadDraftDescriptions))
+	rawDescriptions, err := decryptConfigPayload(
+		environment.DraftDescriptions,
+		draftPayloadContext(environment.NamespaceID, environment.ID, payloadDraftDescriptions),
+	)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	descriptions, err := DecodeConfigDescriptions(rawDescriptions, draft)
 	if err != nil {
-		return nil, nil, nil, errors.Join(ErrConfigStorage, err)
+		return nil, nil, errors.Join(ErrConfigStorage, err)
 	}
-	return resolved, draft, descriptions, nil
+	return draft, descriptions, nil
 }
 
 func ResolveConfigDraft(ctx context.Context, namespaceID, environmentID uint) (*ResolvedConfig, error) {
@@ -696,43 +748,11 @@ func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint
 			if err != nil {
 				return err
 			}
-			encoded, encodedDescriptions, err := encodeResolvedConfig(resolved)
+			published, err := createConfigRelease(tx, namespaceID, batchID, resolved)
 			if err != nil {
 				return err
 			}
-			var latest uint64
-			if err := tx.Model(&ConfigRelease{}).
-				Where("environment_id = ?", id).
-				Select("COALESCE(MAX(version), 0)").
-				Scan(&latest).Error; err != nil {
-				return errors.Join(ErrConfigStorage, err)
-			}
-			release := &ConfigRelease{
-				EnvironmentID: id,
-				BatchID:       batchID,
-				Version:       latest + 1,
-			}
-			storedConfig, err := encryptConfigPayload([]byte(encoded), releasePayloadContext(namespaceID, id, release.Version, payloadReleaseConfig))
-			if err != nil {
-				return err
-			}
-			storedDescriptions, err := encryptConfigPayload([]byte(encodedDescriptions), releasePayloadContext(namespaceID, id, release.Version, payloadReleaseDescriptions))
-			if err != nil {
-				return err
-			}
-			release.Config = storedConfig
-			release.Descriptions = storedDescriptions
-			if err := tx.Create(release).Error; err != nil {
-				return errors.Join(ErrConfigStorage, err)
-			}
-			result.Releases = append(result.Releases, PublishedConfig{
-				EnvironmentID: id,
-				BatchID:       batchID,
-				Version:       release.Version,
-				Config:        resolved.Config,
-				Descriptions:  resolved.Descriptions,
-				PublishedAt:   release.CreatedAt,
-			})
+			result.Releases = append(result.Releases, published)
 		}
 		return nil
 	})
@@ -740,6 +760,174 @@ func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint
 		return nil, errors.Join(ErrConfigStorage, err)
 	}
 	return result, nil
+}
+
+// UpdatePublishedConfigValueBySlugs replaces one existing value in an
+// environment's resolved configuration. It stores the smallest possible draft
+// override and publishes the new resolved snapshot in the same transaction.
+func UpdatePublishedConfigValueBySlugs(
+	ctx context.Context,
+	namespaceSlug string,
+	environmentSlug string,
+	writeAPIKey string,
+	pointer string,
+	rawValue []byte,
+) (*ConfigNamespace, *ConfigEnvironment, *PublishedConfig, error) {
+	namespaceSlug = strings.ToLower(strings.TrimSpace(namespaceSlug))
+	environmentSlug = strings.ToLower(strings.TrimSpace(environmentSlug))
+	if !configSlugPattern.MatchString(namespaceSlug) {
+		return nil, nil, nil, ErrConfigNamespaceInvalid
+	}
+	if !configSlugPattern.MatchString(environmentSlug) {
+		return nil, nil, nil, ErrConfigEnvironmentInvalid
+	}
+	path, err := parseJSONPointer(pointer)
+	if err != nil {
+		return nil, nil, nil, errors.Join(ErrConfigInvalid, err)
+	}
+	value, err := decodeConfigValue(rawValue)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	batchID, err := newConfigBatchID()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	namespace := &ConfigNamespace{}
+	environment := &ConfigEnvironment{}
+	published := &PublishedConfig{}
+	err = DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: configLockUpdate}).
+			Where("slug = ?", namespaceSlug).
+			First(namespace).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.Join(ErrConfigWriteAPIKeyUnauthorized, err)
+			}
+			return errors.Join(ErrConfigStorage, err)
+		}
+		if err := authenticateNamespaceWriteAPIKey(namespace, writeAPIKey); err != nil {
+			return err
+		}
+
+		environments, err := lockedConfigEnvironments(ctx, tx, namespace.ID)
+		if err != nil {
+			return err
+		}
+		targetIndex := configEnvironmentIndexBySlug(environments, environmentSlug)
+		if targetIndex < 0 {
+			return ErrConfigEnvironmentNotFound
+		}
+		*environment = environments[targetIndex]
+		resolved, err := resolveConfigFromEnvironments(environments, environment.ID)
+		if err != nil {
+			return err
+		}
+		if !configPathExists(resolved.Config, path) {
+			return ErrConfigPathNotFound
+		}
+
+		draft, descriptions, err := decodeEnvironmentDraft(*environment)
+		if err != nil {
+			return err
+		}
+		if arrayPointer := configArrayOverridePointer(resolved.Config, path); arrayPointer != "" {
+			copyDescriptionSubtree(descriptions, resolved.Descriptions, arrayPointer)
+		}
+		if err := setConfigOverrideValue(draft, resolved.Config, path, value); err != nil {
+			return err
+		}
+		removeDescriptionDescendants(descriptions, pointer)
+		encoded, encodedDescriptions, err := encodeConfigDraft(draft, descriptions)
+		if err != nil {
+			return err
+		}
+		storedConfig, err := encryptConfigPayload(encoded, draftPayloadContext(namespace.ID, environment.ID, payloadDraftConfig))
+		if err != nil {
+			return err
+		}
+		storedDescriptions, err := encryptConfigPayload(
+			encodedDescriptions,
+			draftPayloadContext(namespace.ID, environment.ID, payloadDraftDescriptions),
+		)
+		if err != nil {
+			return err
+		}
+		if err := tx.Model(environment).UpdateColumns(map[string]any{
+			columnDraftConfig:       storedConfig,
+			columnDraftDescriptions: storedDescriptions,
+		}).Error; err != nil {
+			return errors.Join(ErrConfigStorage, err)
+		}
+		environments[targetIndex].DraftConfig = storedConfig
+		environments[targetIndex].DraftDescriptions = storedDescriptions
+
+		resolved, err = resolveConfigFromEnvironments(environments, environment.ID)
+		if err != nil {
+			return err
+		}
+		created, err := createConfigRelease(tx, namespace.ID, batchID, resolved)
+		if err != nil {
+			return err
+		}
+		*published = created
+		return nil
+	})
+	if err != nil {
+		return nil, nil, nil, errors.Join(ErrConfigStorage, err)
+	}
+	return namespace, environment, published, nil
+}
+
+func createConfigRelease(
+	tx *gorm.DB,
+	namespaceID uint,
+	batchID string,
+	resolved *ResolvedConfig,
+) (PublishedConfig, error) {
+	encoded, encodedDescriptions, err := encodeResolvedConfig(resolved)
+	if err != nil {
+		return PublishedConfig{}, err
+	}
+	var latest uint64
+	if err := tx.Model(&ConfigRelease{}).
+		Where("environment_id = ?", resolved.Environment.ID).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&latest).Error; err != nil {
+		return PublishedConfig{}, errors.Join(ErrConfigStorage, err)
+	}
+	release := &ConfigRelease{
+		EnvironmentID: resolved.Environment.ID,
+		BatchID:       batchID,
+		Version:       latest + 1,
+	}
+	storedConfig, err := encryptConfigPayload(
+		[]byte(encoded),
+		releasePayloadContext(namespaceID, release.EnvironmentID, release.Version, payloadReleaseConfig),
+	)
+	if err != nil {
+		return PublishedConfig{}, err
+	}
+	storedDescriptions, err := encryptConfigPayload(
+		[]byte(encodedDescriptions),
+		releasePayloadContext(namespaceID, release.EnvironmentID, release.Version, payloadReleaseDescriptions),
+	)
+	if err != nil {
+		return PublishedConfig{}, err
+	}
+	release.Config = storedConfig
+	release.Descriptions = storedDescriptions
+	if err := tx.Create(release).Error; err != nil {
+		return PublishedConfig{}, errors.Join(ErrConfigStorage, err)
+	}
+	return PublishedConfig{
+		EnvironmentID: release.EnvironmentID,
+		BatchID:       release.BatchID,
+		Version:       release.Version,
+		Config:        resolved.Config,
+		Descriptions:  resolved.Descriptions,
+		PublishedAt:   release.CreatedAt,
+	}, nil
 }
 
 func encodeResolvedConfig(resolved *ResolvedConfig) (string, string, error) {
@@ -959,31 +1147,73 @@ func decryptConfigPayload(stored, encryptionContext string) ([]byte, error) {
 }
 
 func encryptNamespaceAPIKey(apiKey string, namespaceID uint) (string, error) {
+	return encryptNamespaceCredential(apiKey, namespaceID, namespaceAPIKeyContext(namespaceID))
+}
+
+func encryptNamespaceWriteAPIKey(apiKey string, namespaceID uint) (string, error) {
+	return encryptNamespaceCredential(apiKey, namespaceID, namespaceWriteAPIKeyContext(namespaceID))
+}
+
+func encryptNamespaceCredential(apiKey string, namespaceID uint, encryptionContext string) (string, error) {
 	if !configcrypt.Enabled() {
 		log.Error().Uint("namespace_id", namespaceID).Msg("namespace API key encryption requires an enabled keyring")
 		return "", errors.Join(ErrConfigEncryptionRequired, configcrypt.ErrDisabled)
 	}
-	return encryptConfigPayload([]byte(apiKey), namespaceAPIKeyContext(namespaceID))
+	return encryptConfigPayload([]byte(apiKey), encryptionContext)
 }
 
 func authenticateNamespaceAPIKey(namespace *ConfigNamespace, provided string) error {
-	if provided == "" || namespace.APIKey == "" {
-		return ErrConfigAPIKeyUnauthorized
-	}
-	stored, err := decryptConfigPayload(namespace.APIKey, namespaceAPIKeyContext(namespace.ID))
+	return authenticateNamespaceCredential(
+		namespace.APIKey,
+		provided,
+		namespaceAPIKeyContext(namespace.ID),
+		ErrConfigAPIKeyUnauthorized,
+	)
+}
+
+func authenticateNamespaceWriteAPIKey(namespace *ConfigNamespace, provided string) error {
+	return authenticateNamespaceCredential(
+		namespace.WriteAPIKey,
+		provided,
+		namespaceWriteAPIKeyContext(namespace.ID),
+		ErrConfigWriteAPIKeyUnauthorized,
+	)
+}
+
+func authenticateNamespaceCredential(storedValue, provided, encryptionContext string, unauthorized error) error {
+	matches, err := namespaceCredentialMatches(storedValue, provided, encryptionContext)
 	if err != nil {
 		return err
 	}
-	storedDigest := sha256.Sum256(stored)
-	providedDigest := sha256.Sum256([]byte(provided))
-	if subtle.ConstantTimeCompare(storedDigest[:], providedDigest[:]) != 1 {
-		return ErrConfigAPIKeyUnauthorized
+	if !matches {
+		return unauthorized
 	}
 	return nil
 }
 
+func namespaceCredentialMatches(storedValue, provided, encryptionContext string) (bool, error) {
+	if provided == "" || storedValue == "" {
+		return false, nil
+	}
+	stored, err := decryptConfigPayload(storedValue, encryptionContext)
+	if err != nil {
+		return false, err
+	}
+	return configCredentialsEqual(string(stored), provided), nil
+}
+
+func configCredentialsEqual(left, right string) bool {
+	leftDigest := sha256.Sum256([]byte(left))
+	rightDigest := sha256.Sum256([]byte(right))
+	return subtle.ConstantTimeCompare(leftDigest[:], rightDigest[:]) == 1
+}
+
 func namespaceAPIKeyContext(namespaceID uint) string {
 	return configPayloadContext(namespaceID, 0, 0, payloadNamespaceAPIKey)
+}
+
+func namespaceWriteAPIKeyContext(namespaceID uint) string {
+	return configPayloadContext(namespaceID, 0, 0, payloadNamespaceWriteKey)
 }
 
 func draftPayloadContext(namespaceID, environmentID uint, kind string) string {
@@ -1037,21 +1267,18 @@ func reencryptConfigNamespaces(ctx context.Context, result *ConfigReencryptResul
 			for index := range namespaces {
 				namespace := &namespaces[index]
 				lastID = namespace.ID
-				if namespace.APIKey == "" {
-					continue
-				}
-				updated, changed, err := configcrypt.Reencrypt(namespace.APIKey, namespaceAPIKeyContext(namespace.ID))
+				changes, payloads, err := reencryptNamespaceCredentials(namespace)
 				if err != nil {
-					return errors.Join(ErrConfigStorage, err)
+					return err
 				}
-				if !changed {
+				if len(changes) == 0 {
 					continue
 				}
-				if err := tx.Model(namespace).UpdateColumn("api_key", updated).Error; err != nil {
+				if err := tx.Model(namespace).UpdateColumns(changes).Error; err != nil {
 					return errors.Join(ErrConfigStorage, err)
 				}
 				result.NamespaceRecords++
-				result.Payloads++
+				result.Payloads += payloads
 			}
 			return nil
 		})
@@ -1062,6 +1289,33 @@ func reencryptConfigNamespaces(ctx context.Context, result *ConfigReencryptResul
 			return nil
 		}
 	}
+}
+
+func reencryptNamespaceCredentials(namespace *ConfigNamespace) (map[string]any, int64, error) {
+	credentials := []struct {
+		stored  string
+		context string
+		column  string
+	}{
+		{stored: namespace.APIKey, context: namespaceAPIKeyContext(namespace.ID), column: columnAPIKey},
+		{stored: namespace.WriteAPIKey, context: namespaceWriteAPIKeyContext(namespace.ID), column: columnWriteAPIKey},
+	}
+	changes := make(map[string]any, len(credentials))
+	var payloads int64
+	for _, credential := range credentials {
+		if credential.stored == "" {
+			continue
+		}
+		updated, changed, err := configcrypt.Reencrypt(credential.stored, credential.context)
+		if err != nil {
+			return nil, 0, errors.Join(ErrConfigStorage, err)
+		}
+		if changed {
+			changes[credential.column] = updated
+			payloads++
+		}
+	}
+	return changes, payloads, nil
 }
 
 func reencryptConfigEnvironments(ctx context.Context, result *ConfigReencryptResult) error {
@@ -1227,6 +1481,49 @@ func DecodeConfig(raw []byte) (map[string]any, error) {
 		return nil, err
 	}
 	return config, nil
+}
+
+func decodeConfigValue(raw []byte) (any, error) {
+	if len(raw) == 0 || len(raw) > MaxConfigBytes {
+		return nil, errors.Join(ErrConfigInvalid, errors.New("configuration value size is invalid"))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, errors.Join(ErrConfigInvalid, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("configuration value contains multiple JSON values")
+		}
+		return nil, errors.Join(ErrConfigInvalid, err)
+	}
+	nodes := 0
+	if err := validateConfigValue(value, 1, &nodes); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func encodeConfigDraft(config map[string]any, descriptions ConfigDescriptions) ([]byte, []byte, error) {
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return nil, nil, errors.Join(ErrConfigInvalid, err)
+	}
+	validated, err := DecodeConfig(encoded)
+	if err != nil {
+		return nil, nil, err
+	}
+	encodedDescriptions, err := json.Marshal(descriptions)
+	if err != nil {
+		return nil, nil, errors.Join(ErrConfigInvalid, err)
+	}
+	if _, err := DecodeConfigDescriptions(encodedDescriptions, validated); err != nil {
+		return nil, nil, err
+	}
+	return encoded, encodedDescriptions, nil
 }
 
 func DecodeConfigDescriptions(raw []byte, config map[string]any) (ConfigDescriptions, error) {
@@ -1426,6 +1723,89 @@ func configPathExists(config map[string]any, path []string) bool {
 	return true
 }
 
+func configArrayOverridePointer(config map[string]any, path []string) string {
+	var current any = config
+	pointer := ""
+	for _, segment := range path[:max(len(path)-1, 0)] {
+		switch typed := current.(type) {
+		case map[string]any:
+			current = typed[segment]
+		case []any:
+			index, err := strconv.Atoi(segment)
+			if err != nil || index < 0 || index >= len(typed) {
+				return ""
+			}
+			current = typed[index]
+		default:
+			return ""
+		}
+		pointer = appendJSONPointer(pointer, segment)
+		if _, isArray := current.([]any); isArray {
+			return pointer
+		}
+	}
+	return ""
+}
+
+func setConfigOverrideValue(draft, resolved map[string]any, path []string, value any) error {
+	if len(path) == 0 || !configPathExists(resolved, path) {
+		return ErrConfigPathNotFound
+	}
+	key := path[0]
+	if len(path) == 1 {
+		draft[key] = cloneConfigValue(value)
+		return nil
+	}
+	resolvedChild := resolved[key]
+	if resolvedObject, ok := resolvedChild.(map[string]any); ok {
+		draftObject, exists := draft[key].(map[string]any)
+		if !exists {
+			draftObject = make(map[string]any)
+			draft[key] = draftObject
+		}
+		return setConfigOverrideValue(draftObject, resolvedObject, path[1:], value)
+	}
+
+	// Arrays replace inherited values as a unit, so preserve the entire resolved
+	// array before changing an item inside it.
+	cloned := cloneConfigValue(resolvedChild)
+	if err := replaceConfigValue(cloned, path[1:], value); err != nil {
+		return err
+	}
+	draft[key] = cloned
+	return nil
+}
+
+func replaceConfigValue(current any, path []string, value any) error {
+	if len(path) == 0 {
+		return ErrConfigPathNotFound
+	}
+	switch typed := current.(type) {
+	case map[string]any:
+		child, exists := typed[path[0]]
+		if !exists {
+			return ErrConfigPathNotFound
+		}
+		if len(path) == 1 {
+			typed[path[0]] = cloneConfigValue(value)
+			return nil
+		}
+		return replaceConfigValue(child, path[1:], value)
+	case []any:
+		index, err := strconv.Atoi(path[0])
+		if err != nil || index < 0 || index >= len(typed) || strconv.Itoa(index) != path[0] {
+			return ErrConfigPathNotFound
+		}
+		if len(path) == 1 {
+			typed[index] = cloneConfigValue(value)
+			return nil
+		}
+		return replaceConfigValue(typed[index], path[1:], value)
+	default:
+		return ErrConfigPathNotFound
+	}
+}
+
 func appendJSONPointer(pointer, segment string) string {
 	escaped := strings.ReplaceAll(strings.ReplaceAll(segment, "~", "~0"), "/", "~1")
 	return pointer + "/" + escaped
@@ -1446,6 +1826,14 @@ func removeDescriptionSubtree(descriptions ConfigDescriptions, pointer string) {
 	}
 	for candidate := range descriptions {
 		if candidate == pointer || strings.HasPrefix(candidate, pointer+"/") {
+			delete(descriptions, candidate)
+		}
+	}
+}
+
+func removeDescriptionDescendants(descriptions ConfigDescriptions, pointer string) {
+	for candidate := range descriptions {
+		if strings.HasPrefix(candidate, pointer+"/") {
 			delete(descriptions, candidate)
 		}
 	}
@@ -1492,7 +1880,7 @@ func normalizeConfigNamespaceInput(input ConfigNamespaceInput) ConfigNamespaceIn
 	return input
 }
 
-func validateConfigNamespaceInput(input ConfigNamespaceInput, requireAPIKey bool) error {
+func validateConfigNamespaceInput(input ConfigNamespaceInput, requireAPIKeys bool) error {
 	if input.Name == "" || len(input.Name) > 100 {
 		return errors.Join(ErrConfigNamespaceInvalid, errors.New("namespace name must contain 1 to 100 characters"))
 	}
@@ -1502,12 +1890,55 @@ func validateConfigNamespaceInput(input ConfigNamespaceInput, requireAPIKey bool
 	if len(input.Description) > 500 {
 		return errors.Join(ErrConfigNamespaceInvalid, errors.New("namespace description is too long"))
 	}
-	if requireAPIKey && input.APIKey == "" {
-		return errors.Join(ErrConfigAPIKeyInvalid, errors.New("namespace API key is required"))
+	if err := validateNamespaceCredential(input.APIKey, requireAPIKeys, ErrConfigAPIKeyInvalid, "read"); err != nil {
+		return err
 	}
-	if input.APIKey != "" && (len(input.APIKey) < minConfigAPIKeyLength || len(input.APIKey) > maxConfigAPIKeyLength ||
-		!configAPIKeyPattern.MatchString(input.APIKey)) {
-		return errors.Join(ErrConfigAPIKeyInvalid, errors.New("namespace API key must contain 32 to 256 URL-safe characters"))
+	if err := validateNamespaceCredential(input.WriteAPIKey, requireAPIKeys, ErrConfigWriteAPIKeyInvalid, "write"); err != nil {
+		return err
+	}
+	if input.APIKey != "" && input.WriteAPIKey != "" && configCredentialsEqual(input.APIKey, input.WriteAPIKey) {
+		return ErrConfigAPIKeysNotDistinct
+	}
+	return nil
+}
+
+func validateDistinctNamespaceCredentials(namespace *ConfigNamespace, input ConfigNamespaceInput) error {
+	if input.APIKey != "" && input.WriteAPIKey == "" {
+		matches, err := namespaceCredentialMatches(
+			namespace.WriteAPIKey,
+			input.APIKey,
+			namespaceWriteAPIKeyContext(namespace.ID),
+		)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return ErrConfigAPIKeysNotDistinct
+		}
+	}
+	if input.WriteAPIKey != "" && input.APIKey == "" {
+		matches, err := namespaceCredentialMatches(
+			namespace.APIKey,
+			input.WriteAPIKey,
+			namespaceAPIKeyContext(namespace.ID),
+		)
+		if err != nil {
+			return err
+		}
+		if matches {
+			return ErrConfigAPIKeysNotDistinct
+		}
+	}
+	return nil
+}
+
+func validateNamespaceCredential(apiKey string, required bool, invalid error, kind string) error {
+	if required && apiKey == "" {
+		return errors.Join(invalid, errors.New("namespace "+kind+" API key is required"))
+	}
+	if apiKey != "" && (len(apiKey) < minConfigAPIKeyLength || len(apiKey) > maxConfigAPIKeyLength ||
+		!configAPIKeyPattern.MatchString(apiKey)) {
+		return errors.Join(invalid, errors.New("namespace "+kind+" API key must contain 32 to 256 URL-safe characters"))
 	}
 	return nil
 }
@@ -1612,6 +2043,15 @@ func configEnvironmentByID(environments []ConfigEnvironment, id uint) (ConfigEnv
 		}
 	}
 	return ConfigEnvironment{}, false
+}
+
+func configEnvironmentIndexBySlug(environments []ConfigEnvironment, slug string) int {
+	for index := range environments {
+		if environments[index].Slug == slug {
+			return index
+		}
+	}
+	return -1
 }
 
 func environmentSlugExists(environments []ConfigEnvironment, slug string, exceptID uint) bool {

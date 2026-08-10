@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	configCenterEntry = "src/config-center/main.js"
-	configAPIKeyRealm = "api"
+	configCenterEntry       = "src/config-center/main.js"
+	configAPIKeyRealm       = "api"
+	configReadAPIKeyHeader  = "X-API-Key"
+	configWriteAPIKeyHeader = "X-Write-API-Key"
 )
 
 const (
@@ -25,6 +27,8 @@ const (
 	keyConfigEnvironment = "environment"
 	keyInheritanceChain  = "inheritance_chain"
 	keyConfigReason      = "reason"
+	keyName              = "name"
+	keySlug              = "slug"
 )
 
 var errConfigInheritance = errors.New("resolve inherited configuration failed")
@@ -34,6 +38,7 @@ type configNamespaceForm struct {
 	Slug        string `json:"slug" binding:"required"`
 	Description string `json:"description"`
 	APIKey      string `json:"api_key"`
+	WriteAPIKey string `json:"write_api_key"`
 }
 
 type configEnvironmentForm struct {
@@ -50,6 +55,11 @@ type configDraftForm struct {
 
 type configPublishForm struct {
 	EnvironmentIDs []uint `json:"environment_ids" binding:"required,min=1,max=100"`
+}
+
+type configValuePatchForm struct {
+	Path  string          `json:"path" binding:"required"`
+	Value json.RawMessage `json:"value" binding:"required"`
 }
 
 func ConfigCenterPage(c *base.Context) {
@@ -89,6 +99,7 @@ func ConfigCenterControl(r *base.Router) {
 
 func ConfigCenterRuntimeControl(r *base.Router) {
 	r.GET("/runtime/:namespace/:environment", getPublishedEnvironmentConfig)
+	r.PATCH("/runtime/:namespace/:environment", patchPublishedEnvironmentConfig)
 }
 
 func listConfigNamespaces(c *base.Context) {
@@ -319,7 +330,7 @@ func getPublishedEnvironmentConfig(c *base.Context) {
 		c.Request.Context(),
 		c.Param("namespace"),
 		c.Param("environment"),
-		c.GetHeader("X-API-Key"),
+		c.GetHeader(configReadAPIKeyHeader),
 	)
 	if err != nil {
 		respondConfigError(c, err)
@@ -329,12 +340,12 @@ func getPublishedEnvironmentConfig(c *base.Context) {
 	if outputFormat == configformat.JSON {
 		c.Success(gin.H{
 			keyConfigNamespace: gin.H{
-				"name": namespace.Name,
-				"slug": namespace.Slug,
+				keyName: namespace.Name,
+				keySlug: namespace.Slug,
 			},
 			keyConfigEnvironment: gin.H{
-				"name": environment.Name,
-				"slug": environment.Slug,
+				keyName: environment.Name,
+				keySlug: environment.Slug,
 			},
 			"version":      published.Version,
 			"batch_id":     published.BatchID,
@@ -360,6 +371,47 @@ func getPublishedEnvironmentConfig(c *base.Context) {
 			strconv.FormatUint(published.Version, 10)+"."+outputFormat.Extension()+"\"",
 	)
 	c.Data(http.StatusOK, outputFormat.ContentType(), output)
+}
+
+func patchPublishedEnvironmentConfig(c *base.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64(db.MaxConfigBytes+2048))
+	form := &configValuePatchForm{}
+	if err := c.ShouldBindJSON(form); err != nil {
+		c.ErrorForm("配置更新内容格式不正确", gin.H{KeyError: err.Error()})
+		return
+	}
+	namespace, environment, published, err := db.UpdatePublishedConfigValueBySlugs(
+		c.Request.Context(),
+		c.Param("namespace"),
+		c.Param("environment"),
+		c.GetHeader(configWriteAPIKeyHeader),
+		form.Path,
+		form.Value,
+	)
+	if err != nil {
+		respondConfigError(c, err)
+		return
+	}
+	setPublishedConfigHeaders(c, namespace.Slug, environment.Slug, published)
+	log.Ctx(c.Request.Context()).Info().
+		Uint("namespace_id", namespace.ID).
+		Uint("environment_id", environment.ID).
+		Uint64("version", published.Version).
+		Msg("published config value updated")
+	c.Success(gin.H{
+		keyConfigNamespace: gin.H{
+			keyName: namespace.Name,
+			keySlug: namespace.Slug,
+		},
+		keyConfigEnvironment: gin.H{
+			keyName: environment.Name,
+			keySlug: environment.Slug,
+		},
+		"version":      published.Version,
+		"batch_id":     published.BatchID,
+		"published_at": published.PublishedAt,
+		"path":         form.Path,
+	})
 }
 
 func setPublishedConfigHeaders(c *base.Context, namespaceSlug, environmentSlug string, published *db.PublishedConfig) {
@@ -474,6 +526,7 @@ func configNamespaceInput(form *configNamespaceForm) db.ConfigNamespaceInput {
 		Slug:        form.Slug,
 		Description: form.Description,
 		APIKey:      form.APIKey,
+		WriteAPIKey: form.WriteAPIKey,
 	}
 }
 
@@ -506,9 +559,15 @@ func respondConfigError(c *base.Context, err error) {
 	case errors.Is(err, db.ErrConfigNamespaceInvalid):
 		c.ErrorForm("命名空间信息不合法", gin.H{keyConfigReason: err.Error()})
 	case errors.Is(err, db.ErrConfigAPIKeyInvalid):
-		c.ErrorForm("API Key 必须包含 32 至 256 个 URL 安全字符", gin.H{})
+		c.ErrorForm("读取 API Key 必须包含 32 至 256 个 URL 安全字符", gin.H{})
+	case errors.Is(err, db.ErrConfigWriteAPIKeyInvalid):
+		c.ErrorForm("写入 API Key 必须包含 32 至 256 个 URL 安全字符", gin.H{})
+	case errors.Is(err, db.ErrConfigAPIKeysNotDistinct):
+		c.ErrorForm("读取和写入 API Key 不能相同", gin.H{})
 	case errors.Is(err, db.ErrConfigAPIKeyUnauthorized):
-		c.UnauthorizedAPIKey(configAPIKeyRealm, "API Key 无效", gin.H{})
+		c.UnauthorizedAPIKey(configAPIKeyRealm, "读取 API Key 无效", gin.H{})
+	case errors.Is(err, db.ErrConfigWriteAPIKeyUnauthorized):
+		c.UnauthorizedAPIKey(configAPIKeyRealm, "写入 API Key 无效", gin.H{})
 	case errors.Is(err, db.ErrConfigEncryptionRequired):
 		c.ErrorMessage("配置加密未启用，无法安全保存 API Key")
 	case errors.Is(err, db.ErrConfigEnvironmentNotFound):
@@ -519,6 +578,8 @@ func respondConfigError(c *base.Context, err error) {
 		c.Conflict("环境标识已存在", gin.H{})
 	case errors.Is(err, db.ErrConfigEnvironmentInUse):
 		c.Conflict("请先调整子环境的继承关系", gin.H{})
+	case errors.Is(err, db.ErrConfigPathNotFound):
+		c.ErrorForm("配置路径不存在", gin.H{})
 	case errors.Is(err, db.ErrConfigInvalid):
 		c.ErrorForm("配置内容不合法，请检查字段类型和结构", gin.H{keyConfigReason: err.Error()})
 	case errors.Is(err, db.ErrConfigEnvironmentInvalid):

@@ -24,6 +24,10 @@ table "dc_config_namespaces" {
     null = false
     type = mediumtext
   }
+  column "write_api_key" {
+    null = false
+    type = mediumtext
+  }
   column "created_at" {
     null    = false
     type    = timestamp

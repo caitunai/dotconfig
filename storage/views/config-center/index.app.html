@@ -448,23 +448,33 @@
   <footer class="config-center-footer" aria-labelledby="runtime-api-docs-title">
     <div class="config-center-footer-inner">
       <div>
-        <div class="config-center-footer-eyebrow">Runtime API</div>
-        <h2 id="runtime-api-docs-title">获取已发布配置</h2>
-        <p>通过命名空间 API Key 获取指定环境的最新已发布完整配置。草稿不会通过此接口返回，调用方应始终使用 HTTPS 保护请求头中的凭据。</p>
+        <div class="config-center-footer-eyebrow">Configuration API</div>
+        <h2 id="runtime-api-docs-title">读取与更新已发布配置</h2>
+        <p>读取和写入使用相互独立的命名空间 API Key。读取接口只返回最新发布版本；写入接口只替换已存在的配置路径，并原子生成新的发布版本。调用方应始终使用 HTTPS 保护请求头中的凭据。</p>
         <div class="config-center-footer-formats" aria-label="支持的输出格式">
           <code>json</code><code>yaml</code><code>toml</code><code>env</code><code>ini</code>
         </div>
       </div>
       <div class="config-center-footer-docs">
         <div class="config-center-footer-row">
-          <span class="config-center-footer-label">请求地址 · GET</span>
+          <span class="config-center-footer-label">读取请求 · GET</span>
           <code class="config-center-footer-code" x-text="runtimeAPIEndpoint"></code>
-          <p>请求头：<code class="text-slate-300">X-API-Key: &lt;namespace-api-key&gt;</code>。JSON 返回标准响应结构；其他格式直接返回文本，并以注释保留配置说明。</p>
+          <p>读取凭据：<code class="text-slate-300">X-API-Key: &lt;namespace-api-key&gt;</code>。JSON 返回标准响应结构；其他格式直接返回文本，并以注释保留配置说明。读取 Key 不能调用写入接口。</p>
         </div>
         <div class="config-center-footer-row">
-          <span class="config-center-footer-label">cURL 示例</span>
+          <span class="config-center-footer-label">读取 cURL 示例</span>
           <pre class="config-center-footer-code" x-text="runtimeCurlExample"></pre>
           <button type="button" class="config-center-footer-copy" @click="copyText(runtimeCurlExample)">复制命令</button>
+        </div>
+        <div class="config-center-footer-row">
+          <span class="config-center-footer-label">写入请求 · PATCH</span>
+          <code class="config-center-footer-code" x-text="runtimeWriteAPIEndpoint"></code>
+          <p>写入凭据：<code class="text-slate-300">X-Write-API-Key: &lt;namespace-write-api-key&gt;</code>。请求体使用 RFC 6901 JSON Pointer：<code class="text-slate-300">{"path":"/service/database/host","value":"db.internal"}</code>。目标路径必须已存在，写入 Key 不能读取配置。</p>
+        </div>
+        <div class="config-center-footer-row">
+          <span class="config-center-footer-label">写入 cURL 示例</span>
+          <pre class="config-center-footer-code" x-text="runtimeWriteCurlExample"></pre>
+          <button type="button" class="config-center-footer-copy" @click="copyText(runtimeWriteCurlExample)">复制命令</button>
         </div>
       </div>
     </div>
@@ -479,7 +489,8 @@
       <form class="mt-6 space-y-5" @submit.prevent="saveNamespace()">
         <label class="field-label">命名空间名称<input class="text-input mt-2" maxlength="100" required x-model.trim="namespaceForm.name" placeholder="例如：订单服务"></label>
         <label class="field-label">命名空间标识<input class="text-input mt-2 font-mono" maxlength="64" required x-model.trim="namespaceForm.slug" placeholder="order-service"><span class="field-help">全局唯一，小写字母开头，可包含数字、- 和 _</span></label>
-        <label class="field-label">API Key<input type="password" class="text-input mt-2 font-mono" minlength="32" maxlength="256" pattern="[A-Za-z0-9._~\-]{32,256}" :required="!namespaceForm.id || !namespaceForm.api_key_configured" x-model="namespaceForm.api_key" autocomplete="new-password" spellcheck="false" placeholder="至少 32 个 URL 安全字符"><span class="field-help" x-text="namespaceForm.api_key_configured ? '已安全配置；留空保持不变，填写新值可轮换' : '用于读取此命名空间的已发布配置，保存后不会再次显示'"></span></label>
+        <label class="field-label">读取 API Key<input type="password" class="text-input mt-2 font-mono" minlength="32" maxlength="256" pattern="[A-Za-z0-9._~\-]{32,256}" :required="!namespaceForm.id || !namespaceForm.api_key_configured" x-model="namespaceForm.api_key" autocomplete="new-password" spellcheck="false" placeholder="至少 32 个 URL 安全字符"><span class="field-help" x-text="namespaceForm.api_key_configured ? '已安全配置；留空保持不变，填写新值可独立轮换' : '只用于读取此命名空间的已发布配置，保存后不会再次显示'"></span></label>
+        <label class="field-label">写入 API Key<input type="password" class="text-input mt-2 font-mono" minlength="32" maxlength="256" pattern="[A-Za-z0-9._~\-]{32,256}" :required="!namespaceForm.id || !namespaceForm.write_api_key_configured" x-model="namespaceForm.write_api_key" autocomplete="new-password" spellcheck="false" placeholder="至少 32 个 URL 安全字符"><span class="field-help" x-text="namespaceForm.write_api_key_configured ? '已安全配置；留空保持不变，填写新值可独立轮换' : '只用于更新配置，必须与读取 Key 不同，保存后不会再次显示'"></span></label>
         <label class="field-label">说明<textarea class="text-input mt-2 min-h-24 resize-y" maxlength="500" x-model.trim="namespaceForm.description" placeholder="说明这个命名空间包含的项目或业务"></textarea></label>
         <div class="flex items-center justify-between gap-3 pt-2">
           <button x-show="namespaceForm.id" type="button" class="btn-danger-ghost" :disabled="namespaceSaving" @click="deleteSelectedNamespace()">删除命名空间</button>

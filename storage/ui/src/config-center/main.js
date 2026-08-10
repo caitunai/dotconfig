@@ -560,7 +560,16 @@ function configCenterApp() {
     environmentModal: false, environmentSaving: false, parentSelectorOpen: false,
     sidebarHidden: false, confirming: false,
     toasts: [], toastSequence: 0,
-    namespaceForm: { id: 0, name: "", slug: "", description: "", api_key: "", api_key_configured: false },
+    namespaceForm: {
+      id: 0,
+      name: "",
+      slug: "",
+      description: "",
+      api_key: "",
+      api_key_configured: false,
+      write_api_key: "",
+      write_api_key_configured: false,
+    },
     environmentForm: { id: 0, name: "", slug: "", description: "", parent_id: 0 },
     confirmation: {
       open: false, kind: "", title: "", message: "", confirmLabel: "确认", tone: "primary", targetID: 0, targetNamespaceID: 0, targets: [], urlMode: "push",
@@ -642,6 +651,16 @@ function configCenterApp() {
     get runtimeAPIURL() { return `${window.location.origin}${this.runtimeAPIEndpoint}`; },
     get runtimeCurlExample() {
       return `curl --fail --show-error \\\n  -H "X-API-Key: <namespace-api-key>" \\\n  "${this.runtimeAPIURL}"`;
+    },
+    get runtimeWriteAPIEndpoint() {
+      const namespace = this.selectedNamespace?.slug ?? "{namespace}";
+      const environment = this.selectedEnvironment?.slug ?? "{environment}";
+      return `${API_ROOT}/runtime/${namespace}/${environment}`;
+    },
+    get runtimeWriteAPIURL() { return `${window.location.origin}${this.runtimeWriteAPIEndpoint}`; },
+    get runtimeWriteCurlExample() {
+      const lineContinuation = "\\";
+      return `curl --fail-with-body --request PATCH ${lineContinuation}\n  -H "Content-Type: application/json" ${lineContinuation}\n  -H "X-Write-API-Key: <namespace-write-api-key>" ${lineContinuation}\n  --data '{"path":"/service/database/host","value":"db.internal"}' ${lineContinuation}\n  "${this.runtimeWriteAPIURL}"`;
     },
     get availableParents() { return this.environments.filter((item) => item.id !== this.environmentForm.id && !this.isDescendant(item.id, this.environmentForm.id)); },
     get availableParentRows() { return buildParentEnvironmentTree(this.availableParents); },
@@ -849,8 +868,26 @@ function configCenterApp() {
     openNamespaceModal(namespace = null) {
       this.namespaceMenu = false;
       this.namespaceForm = namespace
-        ? { id: namespace.id, name: namespace.name, slug: namespace.slug, description: namespace.description, api_key: "", api_key_configured: Boolean(namespace.api_key_configured) }
-        : { id: 0, name: "", slug: "", description: "", api_key: "", api_key_configured: false };
+        ? {
+          id: namespace.id,
+          name: namespace.name,
+          slug: namespace.slug,
+          description: namespace.description,
+          api_key: "",
+          api_key_configured: Boolean(namespace.api_key_configured),
+          write_api_key: "",
+          write_api_key_configured: Boolean(namespace.write_api_key_configured),
+        }
+        : {
+          id: 0,
+          name: "",
+          slug: "",
+          description: "",
+          api_key: "",
+          api_key_configured: false,
+          write_api_key: "",
+          write_api_key_configured: false,
+        };
       this.namespaceModal = true;
     },
     closeNamespaceModal() {
@@ -866,6 +903,7 @@ function configCenterApp() {
           slug: this.namespaceForm.slug,
           description: this.namespaceForm.description,
           api_key: this.namespaceForm.api_key,
+          write_api_key: this.namespaceForm.write_api_key,
         };
         const data = await api(id ? `/namespaces/${id}` : "/namespaces", { method: id ? "PUT" : "POST", body });
         this.namespaceModal = false;

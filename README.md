@@ -89,8 +89,9 @@ atlas migrate apply --env local
 
 ### Configuration encryption
 
-Draft configurations, draft descriptions, published configurations, and
-published descriptions support application-layer envelope encryption. The
+Draft configurations, draft descriptions, published configurations,
+published descriptions, and namespace read/write API Keys support
+application-layer envelope encryption. The
 external keyring must not be stored in this repository, in the configuration
 center database, or in a configuration namespace. The application config only
 contains the provider, active key ID, and absolute keyring path:
@@ -145,15 +146,19 @@ JSON uses the normal API response envelope and exposes configuration under
 `data.config` with descriptions under `data.descriptions`. Text formats return
 the configuration directly and include descriptions as comments.
 
-Every namespace has its own API Key. It is accepted only through the
-`X-API-Key` request header, is never returned by the namespace API, and is
-stored with the same external-keyring envelope encryption used by configuration
-payloads. Creating a namespace requires a 32-256 character URL-safe API Key.
-When editing a namespace, leave the field empty to keep the existing key or
-enter a new value to rotate it. Existing namespaces deny runtime API access
-until an API Key has been configured. The runtime API does not require the
-management Basic Auth credentials, but it is available only while
-`configcenter.enabled=true` and still requires the namespace `X-API-Key`.
+Every namespace has independent read and write API Keys. The read Key is
+accepted only through `X-API-Key` and can only call `GET`. The write Key is
+accepted only through `X-Write-API-Key` and can only call `PATCH`; it cannot be
+used to read configuration. Neither Key is returned by the namespace API, and
+both are stored with the same external-keyring envelope encryption used by
+configuration payloads, but with distinct encryption contexts. Creating a
+namespace requires both Keys to contain 32-256 URL-safe characters. When
+creating or rotating credentials, the read and write Keys must differ. When
+editing a namespace, leave either field empty to keep that Key or enter a new
+value to rotate it independently. Existing namespaces migrated from an older
+version deny write access until a write Key has been explicitly configured.
+The runtime APIs do not require the management Basic Auth credentials, but they
+are available only while `configcenter.enabled=true`.
 
 Open the management API with Basic Auth, for example:
 
@@ -175,6 +180,26 @@ Responses include `X-Config-Namespace`, `X-Config-Environment`,
 `X-Config-Version`, `X-Config-Batch`, and `Last-Modified` metadata headers and
 use `Cache-Control: no-store` because published configuration may contain
 sensitive values.
+
+Applications and deployment automation can replace one existing configuration
+value with an authenticated `PATCH` request to the same runtime resource. The
+`path` is an [RFC 6901 JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901), so
+nested object keys and array indexes are unambiguous. The update is written as
+an environment draft override and published as a new immutable version in one
+database transaction; the next `GET` immediately returns the new value.
+
+```shell
+curl --fail-with-body --request PATCH \
+  -H 'Content-Type: application/json' \
+  -H 'X-Write-API-Key: replace-with-the-namespace-write-api-key' \
+  --data '{"path":"/service/database/host","value":"db.internal"}' \
+  'http://127.0.0.1:8080/config-center/api/runtime/my-service/production'
+```
+
+The target path must already exist in the fully resolved environment
+configuration. This prevents a misspelled path from silently creating a new
+setting. Values may be objects, arrays, strings, booleans, or JSON numbers;
+`null` is rejected consistently with management-page configuration validation.
 
 ### Loading published configuration into Viper
 
