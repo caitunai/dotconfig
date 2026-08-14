@@ -572,7 +572,7 @@ function configCenterApp() {
     },
     environmentForm: { id: 0, name: "", slug: "", description: "", parent_id: 0 },
     confirmation: {
-      open: false, kind: "", title: "", message: "", confirmLabel: "确认", tone: "primary", targetID: 0, targetNamespaceID: 0, targets: [], urlMode: "push",
+      open: false, kind: "", title: "", message: "", confirmLabel: "确认", tone: "primary", targetID: 0, targetNamespaceID: 0, targets: [], urlMode: "push", reason: "", requiresReason: false,
     },
 
     async init() {
@@ -660,7 +660,7 @@ function configCenterApp() {
     get runtimeWriteAPIURL() { return `${window.location.origin}${this.runtimeWriteAPIEndpoint}`; },
     get runtimeWriteCurlExample() {
       const lineContinuation = "\\";
-      return `curl --fail-with-body --request PATCH ${lineContinuation}\n  -H "Content-Type: application/json" ${lineContinuation}\n  -H "X-Write-API-Key: <namespace-write-api-key>" ${lineContinuation}\n  --data '{"path":"/service/database/host","value":"db.internal"}' ${lineContinuation}\n  "${this.runtimeWriteAPIURL}"`;
+      return `curl --fail-with-body --request PATCH ${lineContinuation}\n  -H "Content-Type: application/json" ${lineContinuation}\n  -H "X-Write-API-Key: <namespace-write-api-key>" ${lineContinuation}\n  --data '{"updates":[{"path":"/service/database/host","value":"db.internal"},{"path":"/service/database/port","value":3306}],"reason":"切换生产数据库"}' ${lineContinuation}\n  "${this.runtimeWriteAPIURL}"`;
     },
     get availableParents() { return this.environments.filter((item) => item.id !== this.environmentForm.id && !this.isDescendant(item.id, this.environmentForm.id)); },
     get availableParentRows() { return buildParentEnvironmentTree(this.availableParents); },
@@ -1041,7 +1041,13 @@ function configCenterApp() {
     async performPublish() {
       this.publishing = true;
       try {
-        const data = await api(`${this.namespaceAPI()}/publish`, { method: "POST", body: { environment_ids: this.publishIDs } });
+        const data = await api(`${this.namespaceAPI()}/publish`, {
+          method: "POST",
+          body: {
+            environment_ids: this.publishIDs,
+            reason: this.confirmation.reason.trim(),
+          },
+        });
         this.releases = [];
         await this.loadEnvironments();
         if (this.tab === "published") await this.loadPublishedVersions();
@@ -1064,13 +1070,18 @@ function configCenterApp() {
         targetID,
         targetNamespaceID,
         urlMode,
+        reason: "",
+        requiresReason: kind === "publish",
         targets: targets.map((environment) => ({
           id: environment.id,
           name: environment.name,
           slug: environment.slug,
         })),
       };
-      this.$nextTick(() => this.$refs.confirmationButton?.focus());
+      this.$nextTick(() => {
+        if (kind === "publish") this.$refs.confirmationReason?.focus();
+        else this.$refs.confirmationButton?.focus();
+      });
     },
     closeConfirmation() {
       if (this.confirming) return;
@@ -1082,6 +1093,11 @@ function configCenterApp() {
     async confirmPendingAction() {
       if (this.confirming) return;
       const { kind, targetID, targetNamespaceID, urlMode } = this.confirmation;
+      if (kind === "publish" && !this.confirmation.reason.trim()) {
+        this.notify("请输入发布描述", "error");
+        this.$refs.confirmationReason?.focus();
+        return;
+      }
       this.confirming = true;
       try {
         if (kind === "delete") await this.performDeleteEnvironment(targetID);

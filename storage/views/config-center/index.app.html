@@ -294,11 +294,12 @@
                 <div>
                   <h3 class="font-semibold">已发布版本</h3>
                   <p class="mt-1 text-xs text-slate-500" x-text="publishedRelease ? `v${publishedRelease.version} · ${formatDate(publishedRelease.published_at)} · 批次 ${publishedRelease.batch_id}` : '该环境尚未发布'"></p>
+                  <p x-show="publishedRelease?.reason" class="mt-2 max-w-3xl text-sm leading-6 text-slate-600"><span class="font-medium text-slate-700">发布说明：</span><span x-text="publishedRelease?.reason"></span></p>
                 </div>
                 <div x-show="publishedRelease" class="flex items-center gap-2">
                   <div class="format-select" @click.outside="publishedVersionMenu = false" @keydown.escape.stop="publishedVersionMenu = false">
                     <button type="button" class="format-select-trigger" aria-haspopup="listbox" :aria-expanded="publishedVersionMenu" @click="publishedVersionMenu = !publishedVersionMenu"><span x-text="`v${publishedVersion}`"></span><span class="dropdown-arrow" :class="publishedVersionMenu && 'dropdown-arrow-open'"></span></button>
-                    <div x-show="publishedVersionMenu" x-transition.origin.top.right class="format-select-menu published-version-menu" role="listbox"><div class="select-menu-scroll"><template x-for="release in publishedVersions" :key="release.version"><button type="button" class="custom-select-option published-version-option" :class="publishedVersion === release.version && 'custom-select-option-selected'" @click="loadPublished(release.version)" x-text="`v${release.version} · ${formatDate(release.published_at)}`"></button></template></div></div>
+                    <div x-show="publishedVersionMenu" x-transition.origin.top.right class="format-select-menu published-version-menu" role="listbox"><div class="select-menu-scroll"><template x-for="release in publishedVersions" :key="release.version"><button type="button" class="custom-select-option published-version-option" :class="publishedVersion === release.version && 'custom-select-option-selected'" :title="release.reason || '历史版本未记录发布说明'" @click="loadPublished(release.version)" x-text="`v${release.version} · ${formatDate(release.published_at)}`"></button></template></div></div>
                   </div>
                   <div class="format-select" @click.outside="formatMenu = ''" @keydown.escape.stop="formatMenu = ''">
                     <button type="button" class="format-select-trigger" aria-haspopup="listbox" :aria-expanded="formatMenu === 'published'" @click="formatMenu = formatMenu === 'published' ? '' : 'published'"><span x-text="formatLabel(displayFormat)"></span><span class="dropdown-arrow" :class="formatMenu === 'published' && 'dropdown-arrow-open'"></span></button>
@@ -450,7 +451,7 @@
       <div>
         <div class="config-center-footer-eyebrow">Configuration API</div>
         <h2 id="runtime-api-docs-title">读取与更新已发布配置</h2>
-        <p>读取和写入使用相互独立的命名空间 API Key。读取接口只返回最新发布版本；写入接口只替换已存在的配置路径，并原子生成新的发布版本。调用方应始终使用 HTTPS 保护请求头中的凭据。</p>
+        <p>读取和写入使用相互独立的命名空间 API Key。读取接口只返回最新发布版本；写入接口可在一个事务中替换多个已存在路径，并只生成一个带发布原因的新版本。调用方应始终使用 HTTPS 保护请求头中的凭据。</p>
         <div class="config-center-footer-formats" aria-label="支持的输出格式">
           <code>json</code><code>yaml</code><code>toml</code><code>env</code><code>ini</code>
         </div>
@@ -469,7 +470,7 @@
         <div class="config-center-footer-row">
           <span class="config-center-footer-label">写入请求 · PATCH</span>
           <code class="config-center-footer-code" x-text="runtimeWriteAPIEndpoint"></code>
-          <p>写入凭据：<code class="text-slate-300">X-Write-API-Key: &lt;namespace-write-api-key&gt;</code>。请求体使用 RFC 6901 JSON Pointer：<code class="text-slate-300">{"path":"/service/database/host","value":"db.internal"}</code>。目标路径必须已存在，写入 Key 不能读取配置。</p>
+          <p>写入凭据：<code class="text-slate-300">X-Write-API-Key: &lt;namespace-write-api-key&gt;</code>。请求体通过 <code class="text-slate-300">updates</code> 提供 1–100 个 RFC 6901 JSON Pointer 更新，并通过 <code class="text-slate-300">reason</code> 记录 1–500 字符的发布原因。所有目标路径必须已存在，重复或父子重叠路径会被拒绝。</p>
         </div>
         <div class="config-center-footer-row">
           <span class="config-center-footer-label">写入 cURL 示例</span>
@@ -596,13 +597,17 @@
             </div>
           </template>
         </div>
+        <label x-show="confirmation.requiresReason" class="field-label mt-5">发布描述
+          <textarea x-ref="confirmationReason" class="text-input mt-2 min-h-24 resize-y" maxlength="500" x-model="confirmation.reason" placeholder="说明本次发布或配置变更的原因" spellcheck="false"></textarea>
+          <span class="field-help"><span x-text="confirmation.reason.length"></span>/500，发布后将记录在所有所选环境的新版本中</span>
+        </label>
         <div class="mt-6 flex justify-end gap-3">
           <button type="button" class="btn-secondary" :disabled="confirming" @click="closeConfirmation()">取消</button>
           <button
             type="button"
             x-ref="confirmationButton"
             :class="confirmation.tone === 'danger' ? 'btn-danger' : 'btn-primary'"
-            :disabled="confirming"
+            :disabled="confirming || (confirmation.requiresReason && !confirmation.reason.trim())"
             @click="confirmPendingAction()"
             x-text="confirming ? '处理中…' : confirmation.confirmLabel"
           ></button>

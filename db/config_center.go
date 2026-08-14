@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/caitunai/dotconfig/services/configcrypt"
 	"github.com/rs/zerolog/log"
@@ -23,34 +24,38 @@ import (
 )
 
 const (
-	configLockUpdate           = "UPDATE"
-	MaxConfigBytes             = 512 * 1024
-	MaxConfigDescriptionBytes  = 512 * 1024
-	maxConfigDepth             = 32
-	maxConfigNodes             = 5000
-	maxConfigCollection        = 1000
-	maxConfigKeyLength         = 128
-	maxConfigStringLength      = 64 * 1024
-	maxConfigDescriptionLength = 2000
-	maxConfigEnvironments      = 100
-	maxConfigNamespaces        = 50
-	minConfigAPIKeyLength      = 32
-	maxConfigAPIKeyLength      = 256
-	maxEnvironmentDepth        = 16
-	configReencryptBatchSize   = 100
-	payloadDraftConfig         = "draft-config"
-	payloadDraftDescriptions   = "draft-descriptions"
-	payloadReleaseConfig       = "release-config"
-	payloadReleaseDescriptions = "release-descriptions"
-	payloadNamespaceAPIKey     = "namespace-api-key"
-	payloadNamespaceWriteKey   = "namespace-write-api-key"
-	columnDraftConfig          = "draft_config"
-	columnDraftDescriptions    = "draft_descriptions"
-	columnAPIKey               = "api_key"
-	columnWriteAPIKey          = "write_api_key"
-	columnName                 = "name"
-	columnSlug                 = "slug"
-	columnDescription          = "description"
+	configLockUpdate            = "UPDATE"
+	MaxConfigBytes              = 512 * 1024
+	MaxConfigDescriptionBytes   = 512 * 1024
+	MaxConfigUpdateRequestBytes = MaxConfigBytes + 64*1024
+	maxConfigDepth              = 32
+	maxConfigNodes              = 5000
+	maxConfigCollection         = 1000
+	maxConfigKeyLength          = 128
+	maxConfigStringLength       = 64 * 1024
+	maxConfigDescriptionLength  = 2000
+	maxConfigEnvironments       = 100
+	maxConfigNamespaces         = 50
+	maxConfigUpdates            = 100
+	maxConfigReleaseReason      = 500
+	minConfigAPIKeyLength       = 32
+	maxConfigAPIKeyLength       = 256
+	maxEnvironmentDepth         = 16
+	configReencryptBatchSize    = 100
+	payloadDraftConfig          = "draft-config"
+	payloadDraftDescriptions    = "draft-descriptions"
+	payloadReleaseConfig        = "release-config"
+	payloadReleaseDescriptions  = "release-descriptions"
+	payloadNamespaceAPIKey      = "namespace-api-key"
+	payloadNamespaceWriteKey    = "namespace-write-api-key"
+	columnDraftConfig           = "draft_config"
+	columnDraftDescriptions     = "draft_descriptions"
+	columnAPIKey                = "api_key"
+	columnWriteAPIKey           = "write_api_key"
+	columnName                  = "name"
+	columnSlug                  = "slug"
+	columnDescription           = "description"
+	columnReleaseReason         = "reason"
 )
 
 var (
@@ -69,6 +74,9 @@ var (
 	ErrConfigEnvironmentConflict     = errors.New("config environment conflicts with existing data")
 	ErrConfigEnvironmentInUse        = errors.New("config environment is inherited by another environment")
 	ErrConfigReleaseNotFound         = errors.New("published configuration not found")
+	ErrConfigReleaseReasonInvalid    = errors.New("invalid configuration release reason")
+	ErrConfigUpdatesInvalid          = errors.New("invalid configuration updates")
+	ErrConfigUpdateConflict          = errors.New("configuration update paths conflict")
 	ErrConfigPathNotFound            = errors.New("configuration path not found")
 	ErrConfigStorage                 = errors.New("config storage operation failed")
 
@@ -114,6 +122,7 @@ type ConfigRelease struct {
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 	BatchID       string    `gorm:"size:32;not null;index" json:"batch_id"`
+	Reason        string    `gorm:"size:500;not null;default:''" json:"reason"`
 	Config        string    `gorm:"type:mediumtext;not null" json:"-"`
 	Descriptions  string    `gorm:"type:mediumtext;not null" json:"-"`
 	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
@@ -148,6 +157,7 @@ type PublishedConfig struct {
 	Config        map[string]any     `json:"config"`
 	Descriptions  ConfigDescriptions `json:"descriptions"`
 	BatchID       string             `json:"batch_id"`
+	Reason        string             `json:"reason"`
 	EnvironmentID uint               `json:"environment_id"`
 	Version       uint64             `json:"version"`
 }
@@ -157,13 +167,26 @@ type ConfigDescriptions map[string]string
 type ConfigReleaseSummary struct {
 	PublishedAt   time.Time `json:"published_at"`
 	BatchID       string    `json:"batch_id"`
+	Reason        string    `json:"reason"`
 	EnvironmentID uint      `json:"environment_id"`
 	Version       uint64    `json:"version"`
 }
 
 type ConfigPublishResult struct {
 	BatchID  string            `json:"batch_id"`
+	Reason   string            `json:"reason"`
 	Releases []PublishedConfig `json:"releases"`
+}
+
+type ConfigValueUpdate struct {
+	Path  string
+	Value json.RawMessage
+}
+
+type preparedConfigValueUpdate struct {
+	value   any
+	pointer string
+	path    []string
 }
 
 type ConfigReencryptResult struct {
@@ -723,16 +746,20 @@ func resolveConfigFromEnvironments(environments []ConfigEnvironment, environment
 	}, nil
 }
 
-func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint) (*ConfigPublishResult, error) {
+func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint, reason string) (*ConfigPublishResult, error) {
 	ids := uniqueSortedIDs(environmentIDs)
 	if len(ids) == 0 || len(ids) > maxConfigEnvironments {
 		return nil, errors.Join(ErrConfigEnvironmentInvalid, errors.New("select between 1 and 100 environments"))
+	}
+	reason, err := validateConfigReleaseReason(reason)
+	if err != nil {
+		return nil, err
 	}
 	batchID, err := newConfigBatchID()
 	if err != nil {
 		return nil, errors.Join(ErrConfigStorage, err)
 	}
-	result := &ConfigPublishResult{BatchID: batchID, Releases: make([]PublishedConfig, 0, len(ids))}
+	result := &ConfigPublishResult{BatchID: batchID, Reason: reason, Releases: make([]PublishedConfig, 0, len(ids))}
 	err = DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		environments, err := lockedConfigEnvironments(ctx, tx, namespaceID)
 		if err != nil {
@@ -748,7 +775,7 @@ func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint
 			if err != nil {
 				return err
 			}
-			published, err := createConfigRelease(tx, namespaceID, batchID, resolved)
+			published, err := createConfigRelease(tx, namespaceID, batchID, reason, resolved)
 			if err != nil {
 				return err
 			}
@@ -762,16 +789,57 @@ func PublishConfigs(ctx context.Context, namespaceID uint, environmentIDs []uint
 	return result, nil
 }
 
-// UpdatePublishedConfigValueBySlugs replaces one existing value in an
-// environment's resolved configuration. It stores the smallest possible draft
-// override and publishes the new resolved snapshot in the same transaction.
-func UpdatePublishedConfigValueBySlugs(
+func prepareConfigValueUpdates(updates []ConfigValueUpdate) ([]preparedConfigValueUpdate, error) {
+	if len(updates) == 0 || len(updates) > maxConfigUpdates {
+		return nil, errors.Join(ErrConfigUpdatesInvalid, errors.New("select between 1 and 100 configuration values"))
+	}
+	prepared := make([]preparedConfigValueUpdate, 0, len(updates))
+	for _, update := range updates {
+		path, err := parseJSONPointer(update.Path)
+		if err != nil {
+			return nil, errors.Join(ErrConfigUpdatesInvalid, err)
+		}
+		value, err := decodeConfigValue(update.Value)
+		if err != nil {
+			return nil, errors.Join(ErrConfigUpdatesInvalid, err)
+		}
+		for _, existing := range prepared {
+			if configPathsOverlap(existing.path, path) {
+				return nil, ErrConfigUpdateConflict
+			}
+		}
+		prepared = append(prepared, preparedConfigValueUpdate{
+			pointer: update.Path,
+			path:    path,
+			value:   value,
+		})
+	}
+	return prepared, nil
+}
+
+func configPathsOverlap(left, right []string) bool {
+	sharedLength := min(len(left), len(right))
+	return slices.Equal(left[:sharedLength], right[:sharedLength])
+}
+
+func validateConfigReleaseReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || utf8.RuneCountInString(reason) > maxConfigReleaseReason {
+		return "", ErrConfigReleaseReasonInvalid
+	}
+	return reason, nil
+}
+
+// UpdatePublishedConfigValuesBySlugs replaces existing values in an
+// environment's resolved configuration. It stores minimal draft overrides and
+// publishes one new resolved snapshot in the same transaction.
+func UpdatePublishedConfigValuesBySlugs(
 	ctx context.Context,
 	namespaceSlug string,
 	environmentSlug string,
 	writeAPIKey string,
-	pointer string,
-	rawValue []byte,
+	updates []ConfigValueUpdate,
+	reason string,
 ) (*ConfigNamespace, *ConfigEnvironment, *PublishedConfig, error) {
 	namespaceSlug = strings.ToLower(strings.TrimSpace(namespaceSlug))
 	environmentSlug = strings.ToLower(strings.TrimSpace(environmentSlug))
@@ -781,11 +849,11 @@ func UpdatePublishedConfigValueBySlugs(
 	if !configSlugPattern.MatchString(environmentSlug) {
 		return nil, nil, nil, ErrConfigEnvironmentInvalid
 	}
-	path, err := parseJSONPointer(pointer)
+	preparedUpdates, err := prepareConfigValueUpdates(updates)
 	if err != nil {
-		return nil, nil, nil, errors.Join(ErrConfigInvalid, err)
+		return nil, nil, nil, err
 	}
-	value, err := decodeConfigValue(rawValue)
+	reason, err = validateConfigReleaseReason(reason)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -823,21 +891,29 @@ func UpdatePublishedConfigValueBySlugs(
 		if err != nil {
 			return err
 		}
-		if !configPathExists(resolved.Config, path) {
-			return ErrConfigPathNotFound
-		}
 
 		draft, descriptions, err := decodeEnvironmentDraft(*environment)
 		if err != nil {
 			return err
 		}
-		if arrayPointer := configArrayOverridePointer(resolved.Config, path); arrayPointer != "" {
-			copyDescriptionSubtree(descriptions, resolved.Descriptions, arrayPointer)
+		workingConfig := cloneConfigValue(resolved.Config).(map[string]any)
+		workingDescriptions := cloneConfigDescriptions(resolved.Descriptions)
+		for _, update := range preparedUpdates {
+			if !configPathExists(workingConfig, update.path) {
+				return ErrConfigPathNotFound
+			}
+			if arrayPointer := configArrayOverridePointer(workingConfig, update.path); arrayPointer != "" {
+				copyDescriptionSubtree(descriptions, workingDescriptions, arrayPointer)
+			}
+			if err := setConfigOverrideValue(draft, workingConfig, update.path, update.value); err != nil {
+				return err
+			}
+			removeDescriptionDescendants(descriptions, update.pointer)
+			removeDescriptionDescendants(workingDescriptions, update.pointer)
+			if err := replaceConfigValue(workingConfig, update.path, update.value); err != nil {
+				return err
+			}
 		}
-		if err := setConfigOverrideValue(draft, resolved.Config, path, value); err != nil {
-			return err
-		}
-		removeDescriptionDescendants(descriptions, pointer)
 		encoded, encodedDescriptions, err := encodeConfigDraft(draft, descriptions)
 		if err != nil {
 			return err
@@ -866,7 +942,7 @@ func UpdatePublishedConfigValueBySlugs(
 		if err != nil {
 			return err
 		}
-		created, err := createConfigRelease(tx, namespace.ID, batchID, resolved)
+		created, err := createConfigRelease(tx, namespace.ID, batchID, reason, resolved)
 		if err != nil {
 			return err
 		}
@@ -883,6 +959,7 @@ func createConfigRelease(
 	tx *gorm.DB,
 	namespaceID uint,
 	batchID string,
+	reason string,
 	resolved *ResolvedConfig,
 ) (PublishedConfig, error) {
 	encoded, encodedDescriptions, err := encodeResolvedConfig(resolved)
@@ -899,6 +976,7 @@ func createConfigRelease(
 	release := &ConfigRelease{
 		EnvironmentID: resolved.Environment.ID,
 		BatchID:       batchID,
+		Reason:        reason,
 		Version:       latest + 1,
 	}
 	storedConfig, err := encryptConfigPayload(
@@ -923,6 +1001,7 @@ func createConfigRelease(
 	return PublishedConfig{
 		EnvironmentID: release.EnvironmentID,
 		BatchID:       release.BatchID,
+		Reason:        release.Reason,
 		Version:       release.Version,
 		Config:        resolved.Config,
 		Descriptions:  resolved.Descriptions,
@@ -1064,7 +1143,7 @@ func ListConfigReleases(ctx context.Context, namespaceID, environmentID uint) ([
 	releases := make([]ConfigReleaseSummary, 0)
 	if err := DB().WithContext(ctx).
 		Model(&ConfigRelease{}).
-		Select("environment_id, batch_id, version, created_at AS published_at").
+		Select("environment_id, batch_id, reason, version, created_at AS published_at").
 		Where("environment_id = ?", environmentID).
 		Order("version DESC").
 		Scan(&releases).Error; err != nil {
@@ -1080,7 +1159,7 @@ func ListAllConfigReleases(ctx context.Context, namespaceID uint) ([]ConfigRelea
 	releases := make([]ConfigReleaseSummary, 0)
 	if err := DB().WithContext(ctx).
 		Model(&ConfigRelease{}).
-		Select("environment_id, batch_id, version, created_at AS published_at").
+		Select("environment_id, batch_id, reason, version, created_at AS published_at").
 		Where("environment_id IN (?)", DB().Model(&ConfigEnvironment{}).Select("id").Where("namespace_id = ?", namespaceID)).
 		Order("environment_id ASC, version DESC").
 		Scan(&releases).Error; err != nil {
@@ -1105,6 +1184,7 @@ func publishedConfigFromRelease(namespaceID uint, release ConfigRelease) (*Publi
 	return &PublishedConfig{
 		EnvironmentID: release.EnvironmentID,
 		BatchID:       release.BatchID,
+		Reason:        release.Reason,
 		Version:       release.Version,
 		Config:        config,
 		Descriptions:  descriptions,

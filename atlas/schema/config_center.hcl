@@ -131,6 +131,11 @@ table "dc_config_releases" {
     null = false
     type = varchar(32)
   }
+  column "reason" {
+    null    = false
+    type    = varchar(500)
+    default = ""
+  }
   column "version" {
     null = false
     type = bigint

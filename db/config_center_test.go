@@ -118,7 +118,7 @@ func configureTestConfigEncryption(t *testing.T) string {
 	return keyringPath
 }
 
-func TestUpdatePublishedConfigValueBySlugsPublishesInheritedOverride(t *testing.T) {
+func TestUpdatePublishedConfigValuesBySlugsPublishesInheritedOverrides(t *testing.T) {
 	_ = configureTestConfigEncryption(t)
 	previousDB := db
 	connection, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "config-center.db")), &gorm.Config{})
@@ -168,41 +168,53 @@ func TestUpdatePublishedConfigValueBySlugsPublishesInheritedOverride(t *testing.
 		t.Context(),
 		namespace.ID,
 		baseEnvironment.ID,
-		[]byte(`{"service":{"host":"base","port":80}}`),
+		[]byte(`{"service":{"host":"base","port":80},"regions":[{"enabled":false},{"enabled":false}]}`),
 		[]byte(`{}`),
 	); err != nil {
 		t.Fatalf("SaveConfigDraft() error = %v", err)
 	}
-	if _, err := PublishConfigs(t.Context(), namespace.ID, []uint{production.ID}); err != nil {
+	if _, err := PublishConfigs(t.Context(), namespace.ID, []uint{production.ID}, "initial release"); err != nil {
 		t.Fatalf("PublishConfigs() error = %v", err)
 	}
-	if _, _, _, err := UpdatePublishedConfigValueBySlugs(
+	if _, _, _, err := UpdatePublishedConfigValuesBySlugs(
 		t.Context(),
 		namespace.Slug,
 		production.Slug,
 		readAPIKey,
-		testServiceHostPointer,
-		[]byte(`"denied"`),
+		[]ConfigValueUpdate{{Path: testServiceHostPointer, Value: []byte(`"denied"`)}},
+		"unauthorized update",
 	); !errors.Is(err, ErrConfigWriteAPIKeyUnauthorized) {
-		t.Fatalf("UpdatePublishedConfigValueBySlugs(read key) error = %v, want ErrConfigWriteAPIKeyUnauthorized", err)
+		t.Fatalf("UpdatePublishedConfigValuesBySlugs(read key) error = %v, want ErrConfigWriteAPIKeyUnauthorized", err)
 	}
 
-	_, _, published, err := UpdatePublishedConfigValueBySlugs(
+	_, _, published, err := UpdatePublishedConfigValuesBySlugs(
 		t.Context(),
 		namespace.Slug,
 		production.Slug,
 		writeAPIKey,
-		testServiceHostPointer,
-		[]byte(`"`+testProduction+`"`),
+		[]ConfigValueUpdate{
+			{Path: testServiceHostPointer, Value: []byte(`"` + testProduction + `"`)},
+			{Path: "/service/port", Value: []byte(`443`)},
+			{Path: "/regions/0/enabled", Value: []byte(`true`)},
+			{Path: "/regions/1/enabled", Value: []byte(`true`)},
+		},
+		"switch production endpoint",
 	)
 	if err != nil {
-		t.Fatalf("UpdatePublishedConfigValueBySlugs() error = %v", err)
+		t.Fatalf("UpdatePublishedConfigValuesBySlugs() error = %v", err)
 	}
 	if published.Version != 2 || published.Config[testService].(map[string]any)[testHost] != testProduction {
 		t.Fatalf("published = %#v, want version 2 with production host", published)
 	}
-	if published.Config[testService].(map[string]any)[testPort] != json.Number("80") {
-		t.Fatal("published configuration lost an inherited sibling value")
+	if published.Config[testService].(map[string]any)[testPort] != json.Number("443") {
+		t.Fatal("published configuration did not include every update")
+	}
+	regions := published.Config[testRegions].([]any)
+	if regions[0].(map[string]any)[testEnabled] != true || regions[1].(map[string]any)[testEnabled] != true {
+		t.Fatalf("published regions = %#v, want both array updates", regions)
+	}
+	if published.Reason != "switch production endpoint" {
+		t.Fatalf("published reason = %q, want switch production endpoint", published.Reason)
 	}
 
 	_, draft, _, err := GetConfigDraft(t.Context(), namespace.ID, production.ID)
@@ -210,18 +222,60 @@ func TestUpdatePublishedConfigValueBySlugsPublishesInheritedOverride(t *testing.
 		t.Fatalf("GetConfigDraft() error = %v", err)
 	}
 	service, ok := draft[testService].(map[string]any)
-	if !ok || len(service) != 1 || service[testHost] != testProduction {
-		t.Fatalf("draft = %#v, want minimal host-only override", draft)
+	if !ok || len(service) != 2 || service[testHost] != testProduction || service[testPort] != json.Number("443") {
+		t.Fatalf("draft = %#v, want both minimal overrides", draft)
 	}
 	_, _, latest, err := LatestPublishedConfigBySlugs(t.Context(), namespace.Slug, production.Slug, readAPIKey)
 	if err != nil {
 		t.Fatalf("LatestPublishedConfigBySlugs() error = %v", err)
 	}
-	if latest.Version != published.Version || latest.Config[testService].(map[string]any)[testHost] != testProduction {
+	if latest.Version != published.Version || latest.Config[testService].(map[string]any)[testHost] != testProduction || latest.Reason != published.Reason {
 		t.Fatalf("latest = %#v, want newly published configuration", latest)
 	}
 	if _, _, _, err := LatestPublishedConfigBySlugs(t.Context(), namespace.Slug, production.Slug, writeAPIKey); !errors.Is(err, ErrConfigAPIKeyUnauthorized) {
 		t.Fatalf("LatestPublishedConfigBySlugs(write key) error = %v, want ErrConfigAPIKeyUnauthorized", err)
+	}
+	releases, err := ListConfigReleases(t.Context(), namespace.ID, production.ID)
+	if err != nil {
+		t.Fatalf("ListConfigReleases() error = %v", err)
+	}
+	if len(releases) != 2 || releases[0].Reason != published.Reason || releases[1].Reason != "initial release" {
+		t.Fatalf("releases = %#v, want reasons for both immutable versions", releases)
+	}
+	if _, _, _, err := UpdatePublishedConfigValuesBySlugs(
+		t.Context(),
+		namespace.Slug,
+		production.Slug,
+		writeAPIKey,
+		[]ConfigValueUpdate{
+			{Path: testServiceHostPointer, Value: []byte(`"must-rollback"`)},
+			{Path: "/missing/path", Value: []byte(`true`)},
+		},
+		"invalid partial update",
+	); !errors.Is(err, ErrConfigPathNotFound) {
+		t.Fatalf("UpdatePublishedConfigValuesBySlugs(partial) error = %v, want ErrConfigPathNotFound", err)
+	}
+	_, rolledBackDraft, _, err := GetConfigDraft(t.Context(), namespace.ID, production.ID)
+	if err != nil {
+		t.Fatalf("GetConfigDraft(after rollback) error = %v", err)
+	}
+	encodedDraft, err := json.Marshal(draft)
+	if err != nil {
+		t.Fatalf("json.Marshal(draft) error = %v", err)
+	}
+	encodedRolledBackDraft, err := json.Marshal(rolledBackDraft)
+	if err != nil {
+		t.Fatalf("json.Marshal(rolledBackDraft) error = %v", err)
+	}
+	if !slices.Equal(encodedDraft, encodedRolledBackDraft) {
+		t.Fatalf("draft after failed batch = %#v, want unchanged %#v", rolledBackDraft, draft)
+	}
+	releases, err = ListConfigReleases(t.Context(), namespace.ID, production.ID)
+	if err != nil {
+		t.Fatalf("ListConfigReleases(after rollback) error = %v", err)
+	}
+	if len(releases) != 2 {
+		t.Fatalf("release count after failed batch = %d, want 2", len(releases))
 	}
 }
 
@@ -323,6 +377,64 @@ func TestDecodeConfigValuePreservesTypesAndRejectsNull(t *testing.T) {
 	}
 	if _, err := decodeConfigValue([]byte(`true false`)); !errors.Is(err, ErrConfigInvalid) {
 		t.Fatalf("decodeConfigValue(multiple) error = %v, want ErrConfigInvalid", err)
+	}
+}
+
+func TestPrepareConfigValueUpdatesRejectsOverlappingPaths(t *testing.T) {
+	t.Parallel()
+
+	prepared, err := prepareConfigValueUpdates([]ConfigValueUpdate{
+		{Path: testServiceHostPointer, Value: []byte(`"api"`)},
+		{Path: "/service/port", Value: []byte(`443`)},
+	})
+	if err != nil || len(prepared) != 2 {
+		t.Fatalf("prepareConfigValueUpdates() = %#v, %v; want two updates", prepared, err)
+	}
+	tests := []struct {
+		name    string
+		updates []ConfigValueUpdate
+	}{
+		{
+			name: "duplicate",
+			updates: []ConfigValueUpdate{
+				{Path: testServiceHostPointer, Value: []byte(`"one"`)},
+				{Path: testServiceHostPointer, Value: []byte(`"two"`)},
+			},
+		},
+		{
+			name: "parent and child",
+			updates: []ConfigValueUpdate{
+				{Path: testServicePointer, Value: []byte(`{"host":"one"}`)},
+				{Path: testServiceHostPointer, Value: []byte(`"two"`)},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := prepareConfigValueUpdates(tt.updates); !errors.Is(err, ErrConfigUpdateConflict) {
+				t.Fatalf("prepareConfigValueUpdates() error = %v, want ErrConfigUpdateConflict", err)
+			}
+		})
+	}
+}
+
+func TestValidateConfigReleaseReason(t *testing.T) {
+	t.Parallel()
+
+	reason, err := validateConfigReleaseReason("  deploy release  ")
+	if err != nil || reason != "deploy release" {
+		t.Fatalf("validateConfigReleaseReason() = %q, %v", reason, err)
+	}
+	if _, err := validateConfigReleaseReason("   "); !errors.Is(err, ErrConfigReleaseReasonInvalid) {
+		t.Fatalf("validateConfigReleaseReason(empty) error = %v, want ErrConfigReleaseReasonInvalid", err)
+	}
+	if _, err := validateConfigReleaseReason(strings.Repeat("a", maxConfigReleaseReason+1)); !errors.Is(err, ErrConfigReleaseReasonInvalid) {
+		t.Fatalf("validateConfigReleaseReason(long) error = %v, want ErrConfigReleaseReasonInvalid", err)
+	}
+	unicodeReason := strings.Repeat("发", maxConfigReleaseReason)
+	if unicodeValidated, err := validateConfigReleaseReason(unicodeReason); err != nil || unicodeValidated != unicodeReason {
+		t.Fatalf("validateConfigReleaseReason(unicode) length = %d, error = %v", len([]rune(unicodeValidated)), err)
 	}
 }
 

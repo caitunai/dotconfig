@@ -31,7 +31,10 @@ const (
 	keySlug              = "slug"
 )
 
-var errConfigInheritance = errors.New("resolve inherited configuration failed")
+var (
+	errConfigInheritance = errors.New("resolve inherited configuration failed")
+	errConfigValuePatch  = errors.New("invalid configuration value patch form")
+)
 
 type configNamespaceForm struct {
 	Name        string `json:"name" binding:"required"`
@@ -54,12 +57,20 @@ type configDraftForm struct {
 }
 
 type configPublishForm struct {
+	Reason         string `json:"reason" binding:"required,max=500"`
 	EnvironmentIDs []uint `json:"environment_ids" binding:"required,min=1,max=100"`
 }
 
-type configValuePatchForm struct {
-	Path  string          `json:"path" binding:"required"`
-	Value json.RawMessage `json:"value" binding:"required"`
+type configValueUpdateForm struct {
+	Path  string          `json:"path"`
+	Value json.RawMessage `json:"value"`
+}
+
+type configValuesPatchForm struct {
+	Reason  string                  `json:"reason" binding:"required,max=500"`
+	Path    string                  `json:"path"`
+	Updates []configValueUpdateForm `json:"updates"`
+	Value   json.RawMessage         `json:"value"`
 }
 
 func ConfigCenterPage(c *base.Context) {
@@ -349,6 +360,7 @@ func getPublishedEnvironmentConfig(c *base.Context) {
 			},
 			"version":      published.Version,
 			"batch_id":     published.BatchID,
+			"reason":       published.Reason,
 			"published_at": published.PublishedAt,
 			"config":       published.Config,
 			"descriptions": published.Descriptions,
@@ -374,19 +386,24 @@ func getPublishedEnvironmentConfig(c *base.Context) {
 }
 
 func patchPublishedEnvironmentConfig(c *base.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64(db.MaxConfigBytes+2048))
-	form := &configValuePatchForm{}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, int64(db.MaxConfigUpdateRequestBytes))
+	form := &configValuesPatchForm{}
 	if err := c.ShouldBindJSON(form); err != nil {
 		c.ErrorForm("配置更新内容格式不正确", gin.H{KeyError: err.Error()})
 		return
 	}
-	namespace, environment, published, err := db.UpdatePublishedConfigValueBySlugs(
+	updates, err := configValueUpdates(form)
+	if err != nil {
+		c.ErrorForm("请提供 1 至 100 个格式正确的配置更新项", gin.H{})
+		return
+	}
+	namespace, environment, published, err := db.UpdatePublishedConfigValuesBySlugs(
 		c.Request.Context(),
 		c.Param("namespace"),
 		c.Param("environment"),
 		c.GetHeader(configWriteAPIKeyHeader),
-		form.Path,
-		form.Value,
+		updates,
+		form.Reason,
 	)
 	if err != nil {
 		respondConfigError(c, err)
@@ -397,7 +414,12 @@ func patchPublishedEnvironmentConfig(c *base.Context) {
 		Uint("namespace_id", namespace.ID).
 		Uint("environment_id", environment.ID).
 		Uint64("version", published.Version).
-		Msg("published config value updated")
+		Int("update_count", len(updates)).
+		Msg("published config values updated")
+	paths := make([]string, len(updates))
+	for index := range updates {
+		paths[index] = updates[index].Path
+	}
 	c.Success(gin.H{
 		keyConfigNamespace: gin.H{
 			keyName: namespace.Name,
@@ -410,8 +432,32 @@ func patchPublishedEnvironmentConfig(c *base.Context) {
 		"version":      published.Version,
 		"batch_id":     published.BatchID,
 		"published_at": published.PublishedAt,
-		"path":         form.Path,
+		"reason":       published.Reason,
+		"paths":        paths,
 	})
+}
+
+func configValueUpdates(form *configValuesPatchForm) ([]db.ConfigValueUpdate, error) {
+	hasUpdates := len(form.Updates) > 0
+	hasLegacyUpdate := form.Path != "" || len(form.Value) > 0
+	if hasUpdates == hasLegacyUpdate {
+		return nil, errConfigValuePatch
+	}
+	forms := form.Updates
+	if hasLegacyUpdate {
+		forms = []configValueUpdateForm{{Path: form.Path, Value: form.Value}}
+	}
+	if len(forms) == 0 || len(forms) > 100 {
+		return nil, errConfigValuePatch
+	}
+	updates := make([]db.ConfigValueUpdate, len(forms))
+	for index := range forms {
+		if forms[index].Path == "" || len(forms[index].Value) == 0 {
+			return nil, errConfigValuePatch
+		}
+		updates[index] = db.ConfigValueUpdate{Path: forms[index].Path, Value: forms[index].Value}
+	}
+	return updates, nil
 }
 
 func setPublishedConfigHeaders(c *base.Context, namespaceSlug, environmentSlug string, published *db.PublishedConfig) {
@@ -478,7 +524,7 @@ func publishConfigs(c *base.Context) {
 		c.ErrorForm("请选择需要发布的环境", gin.H{KeyError: err.Error()})
 		return
 	}
-	result, err := db.PublishConfigs(c.Request.Context(), namespaceID, form.EnvironmentIDs)
+	result, err := db.PublishConfigs(c.Request.Context(), namespaceID, form.EnvironmentIDs, form.Reason)
 	if err != nil {
 		respondConfigError(c, err)
 		return
@@ -578,6 +624,12 @@ func respondConfigError(c *base.Context, err error) {
 		c.Conflict("环境标识已存在", gin.H{})
 	case errors.Is(err, db.ErrConfigEnvironmentInUse):
 		c.Conflict("请先调整子环境的继承关系", gin.H{})
+	case errors.Is(err, db.ErrConfigReleaseReasonInvalid):
+		c.ErrorForm("发布原因必须包含 1 至 500 个字符", gin.H{})
+	case errors.Is(err, db.ErrConfigUpdateConflict):
+		c.ErrorForm("配置更新路径不能重复或互为父子路径", gin.H{})
+	case errors.Is(err, db.ErrConfigUpdatesInvalid):
+		c.ErrorForm("配置更新项不合法", gin.H{keyConfigReason: err.Error()})
 	case errors.Is(err, db.ErrConfigPathNotFound):
 		c.ErrorForm("配置路径不存在", gin.H{})
 	case errors.Is(err, db.ErrConfigInvalid):

@@ -181,25 +181,28 @@ Responses include `X-Config-Namespace`, `X-Config-Environment`,
 use `Cache-Control: no-store` because published configuration may contain
 sensitive values.
 
-Applications and deployment automation can replace one existing configuration
-value with an authenticated `PATCH` request to the same runtime resource. The
-`path` is an [RFC 6901 JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901), so
-nested object keys and array indexes are unambiguous. The update is written as
-an environment draft override and published as a new immutable version in one
-database transaction; the next `GET` immediately returns the new value.
+Applications and deployment automation can replace up to 100 existing
+configuration values with one authenticated `PATCH` request. Each `path` is an
+[RFC 6901 JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901), so nested object
+keys and array indexes are unambiguous. All updates are written as environment
+draft overrides and published as one immutable version in a single database
+transaction. A trimmed 1-500 character `reason` is required and stored with the
+release.
 
 ```shell
 curl --fail-with-body --request PATCH \
   -H 'Content-Type: application/json' \
   -H 'X-Write-API-Key: replace-with-the-namespace-write-api-key' \
-  --data '{"path":"/service/database/host","value":"db.internal"}' \
+  --data '{"updates":[{"path":"/service/database/host","value":"db.internal"},{"path":"/service/database/port","value":3306}],"reason":"switch production database"}' \
   'http://127.0.0.1:8080/config-center/api/runtime/my-service/production'
 ```
 
-The target path must already exist in the fully resolved environment
-configuration. This prevents a misspelled path from silently creating a new
-setting. Values may be objects, arrays, strings, booleans, or JSON numbers;
-`null` is rejected consistently with management-page configuration validation.
+Every target path must already exist in the fully resolved environment
+configuration. Duplicate paths and parent/child path combinations are rejected
+to avoid order-dependent results. The legacy single `path` plus `value` body is
+still accepted when `reason` is supplied. Values may be objects, arrays,
+strings, booleans, or JSON numbers; `null` is rejected consistently with
+management-page configuration validation.
 
 ### Loading published configuration into Viper
 
