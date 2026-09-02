@@ -6,7 +6,7 @@ replace ariga.io/atlas => github.com/iflamed/atlas v1.0.1-0.20260508104337-7d20c
 
 require (
 	ariga.io/atlas v1.3.0
-	github.com/ThreeDotsLabs/watermill v1.5.2
+	github.com/ThreeDotsLabs/watermill v1.5.3
 	github.com/ThreeDotsLabs/watermill-redisstream v1.4.5
 	github.com/gin-contrib/cors v1.7.7
 	github.com/gin-contrib/logger v1.2.7
